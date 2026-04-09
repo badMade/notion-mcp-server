@@ -1,0 +1,3 @@
+## 2024-05-18 - Caching convertComponentsToJsonSchema Optimization
+**Learning:** Adding memoization to `convertComponentsToJsonSchema` in `OpenAPIToMCPConverter` significantly speeds up the conversion of OpenAPI specifications into MCP tools format. The original implementation was recomputing the entire schema components definition multiple times per OpenAPI operation, leading to a massive performance penalty for large specs.
+**Action:** Always look for O(N * C) patterns where a statically known map (C) is rebuilt repeatedly on every iteration (N). A simple instance-level cache can eliminate this entirely.
