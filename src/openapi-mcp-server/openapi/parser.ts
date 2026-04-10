@@ -20,6 +20,7 @@ type FunctionParameters = {
 export class OpenAPIToMCPConverter {
   private schemaCache: Record<string, IJsonSchema> = {}
   private nameCounter: number = 0
+  private componentsJsonSchemaCache: Record<string, IJsonSchema> | null = null
 
   constructor(private openApiSpec: OpenAPIV3.Document | OpenAPIV3_1.Document) {}
 
@@ -250,11 +251,17 @@ export class OpenAPIToMCPConverter {
   }
 
   private convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+    // Optimization: Cache the converted components JSON schema since openApiSpec is constant
+    // This avoids redundant O(N) processing when multiple tool input schemas or responses are extracted
+    if (this.componentsJsonSchemaCache) {
+      return this.componentsJsonSchemaCache
+    }
     const components = this.openApiSpec.components || {}
     const schema: Record<string, IJsonSchema> = {}
     for (const [key, value] of Object.entries(components.schemas || {})) {
       schema[key] = this.convertOpenApiSchemaToJsonSchema(value, new Set())
     }
+    this.componentsJsonSchemaCache = schema
     return schema
   }
   /**
