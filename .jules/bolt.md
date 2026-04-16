@@ -1,0 +1,3 @@
+## 2024-05-15 - [Caching Component Schema Conversions for Large OpenAPI Specs]
+**Learning:** [In an OpenAPI parser that recursively expands or converts components for every API endpoint, performance degrades to $O(N \times M)$ where $N$ is the number of endpoints and $M$ is the number of components. We discovered that without memoizing `convertComponentsToJsonSchema`, converting a spec with 1000 endpoints and 1000 components took over 5000ms. By caching the conversion result, the time dropped down to 60ms.]
+**Action:** [Always verify and cache invariant schema components when parsing large interface definitions, especially when a generation function is called iteratively across all endpoints.]
