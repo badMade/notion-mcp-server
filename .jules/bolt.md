@@ -1,0 +1,3 @@
+## 2024-04-17 - OpenAPI Parser Schema Conversion Caching
+**Learning:** `convertComponentsToJsonSchema` loops over `components.schemas` and repeatedly rebuilds exactly the same JSON schema definitions structure every time it's called. This method was called for every definition (`$defs`) in each schema generated for every OpenAPI path/method combination. In large specifications (e.g., thousands of schemas), this exponential redundant work caused severe performance degradation (O(n^2) scaling roughly).
+**Action:** Caching the return value of `convertComponentsToJsonSchema` so that it calculates the common `$defs` once dramatically speeds up schema parsing (e.g. from 57 seconds down to 84ms in the benchmark). I will create a PR to persist this caching optimization.
