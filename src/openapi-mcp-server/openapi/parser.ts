@@ -19,6 +19,7 @@ type FunctionParameters = {
 
 export class OpenAPIToMCPConverter {
   private schemaCache: Record<string, IJsonSchema> = {}
+  private cachedDefs?: Record<string, IJsonSchema>
   private nameCounter: number = 0
 
   constructor(private openApiSpec: OpenAPIV3.Document | OpenAPIV3_1.Document) {}
@@ -250,11 +251,19 @@ export class OpenAPIToMCPConverter {
   }
 
   private convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+    // ⚡ Bolt Optimization: Cache the converted components
+    // Converting the entire components.schemas object into JSON Schema is an expensive operation.
+    // By caching the result, we avoid re-evaluating the same schemas repeatedly when resolving multiple API operations,
+    // dramatically reducing processing time for large OpenApi specs (e.g. going from O(n*m) down to O(n)).
+    if (this.cachedDefs) return this.cachedDefs;
+
     const components = this.openApiSpec.components || {}
     const schema: Record<string, IJsonSchema> = {}
     for (const [key, value] of Object.entries(components.schemas || {})) {
       schema[key] = this.convertOpenApiSchemaToJsonSchema(value, new Set())
     }
+
+    this.cachedDefs = schema;
     return schema
   }
   /**
