@@ -1,0 +1,3 @@
+## 2025-03-05 - OpenAPI Schema Component Caching
+**Learning:** In the `OpenAPIToMCPConverter`, recursively generating JSON schemas (`convertComponentsToJsonSchema`) without caching `$defs` creates massive redundant object creation. On large specs (e.g. 2000 operations/components), this generates O(N * C) redundant schema evaluations, resulting in out-of-memory (OOM) errors and extremely poor performance.
+**Action:** Always ensure that heavy intermediate derivations (like converting shared components or references) are memoized so they are computed exactly once per instance/conversion cycle.
