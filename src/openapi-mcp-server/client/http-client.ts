@@ -177,7 +177,8 @@ export class HttpClient {
       }
     } catch (error: any) {
       if (error.response) {
-        console.error('Error in http client', error)
+        // 🛡️ Sentinel: Do not log the full error object as it contains sensitive info in `error.config.headers`
+        console.error(`Error in http client: ${error.message} (Status: ${error.response.status})`)
         const headers = new Headers()
         Object.entries(error.response.headers).forEach(([key, value]) => {
           if (value) headers.append(key, value.toString())
