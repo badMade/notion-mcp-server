@@ -1,6 +1,6 @@
 import { MCPProxy } from '../proxy'
 import { OpenAPIV3 } from 'openapi-types'
-import { HttpClient } from '../../client/http-client'
+import { HttpClient, HttpClientError } from '../../client/http-client'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 
@@ -130,6 +130,43 @@ describe('MCPProxy', () => {
           },
         }),
       ).rejects.toThrow('Method nonExistentMethod not found')
+    })
+
+    it('should return correct HTTP status code from HttpClientError', async () => {
+      const mockError = new HttpClientError('Not Found', 404, { detail: 'Not found' })
+      ;(HttpClient.prototype.executeOperation as ReturnType<typeof vi.fn>).mockRejectedValue(mockError)
+
+      ;(proxy as any).openApiLookup = {
+        'API-getTest': {
+          operationId: 'getTest',
+          responses: { '200': { description: 'Success' } },
+          method: 'get',
+          path: '/test',
+        },
+      }
+
+      const server = (proxy as any).server
+      const handlers = server.setRequestHandler.mock.calls.flatMap((x: unknown[]) => x).filter((x: unknown) => typeof x === 'function')
+      const callToolHandler = handlers[1]
+
+      const result = await callToolHandler({
+        params: {
+          name: 'API-getTest',
+          arguments: {},
+        },
+      })
+
+      expect(result).toEqual({
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 404,
+              detail: 'Not found',
+            }),
+          },
+        ],
+      })
     })
 
     it('should handle tool names exceeding 64 characters', async () => {

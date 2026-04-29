@@ -107,7 +107,7 @@ export class MCPProxy {
               {
                 type: 'text',
                 text: JSON.stringify({
-                  status: 'error', // TODO: get this from http status code?
+                  status: error.status,
                   ...(typeof data === 'object' ? data : { data: data }),
                 }),
               },
