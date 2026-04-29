@@ -449,28 +449,11 @@ export class OpenAPIToMCPConverter {
     // Extract return type (response schema)
     const returnSchema = this.extractResponseType(operation.responses)
 
-    // Generate Zod schema from input schema
-    try {
-      // const zodSchemaStr = jsonSchemaToZod(inputSchema, { module: "cjs" })
-      // console.log(zodSchemaStr)
-      // // Execute the function with the zod instance
-      // const zodSchema = eval(zodSchemaStr) as z.ZodType
-
-      return {
-        name: methodName,
-        description,
-        inputSchema,
-        ...(returnSchema ? { returnSchema } : {}),
-      }
-    } catch (error) {
-      console.warn(`Failed to generate Zod schema for ${methodName}:`, error)
-      // Fallback to a basic object schema
-      return {
-        name: methodName,
-        description,
-        inputSchema,
-        ...(returnSchema ? { returnSchema } : {}),
-      }
+    return {
+      name: methodName,
+      description,
+      inputSchema,
+      ...(returnSchema ? { returnSchema } : {}),
     }
   }
 
