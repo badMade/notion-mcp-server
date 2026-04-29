@@ -433,13 +433,14 @@ export class OpenAPIToMCPConverter {
     // Build description including error responses
     let description = operation.summary || operation.description || ''
     if (operation.responses) {
-      const errorResponses = Object.entries(operation.responses)
-        .filter(([code]) => code.startsWith('4') || code.startsWith('5'))
-        .map(([code, response]) => {
+      const errorResponses = Object.entries(operation.responses).reduce<string[]>((acc, [code, response]) => {
+        if (code.startsWith('4') || code.startsWith('5')) {
           const responseObj = this.resolveResponse(response)
-          let errorDesc = responseObj?.description || ''
-          return `${code}: ${errorDesc}`
-        })
+          const errorDesc = responseObj?.description || ''
+          acc.push(`${code}: ${errorDesc}`)
+        }
+        return acc
+      }, [])
 
       if (errorResponses.length > 0) {
         description += '\nError Responses:\n' + errorResponses.join('\n')
