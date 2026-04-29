@@ -249,24 +249,14 @@ npx @notionhq/notion-mcp-server --transport http --auth-token "your-secret-token
 When using Streamable HTTP transport, the server will be available at `http://0.0.0.0:<port>/mcp`.
 
 ##### Authentication
-The Streamable HTTP transport requires bearer token authentication for security. You have three options:
+The Streamable HTTP transport requires bearer token authentication for security. You must provide a token using one of the following options:
 
-**Option 1: Auto-generated token (recommended for development)**
-```bash
-npx @notionhq/notion-mcp-server --transport http
-```
-The server will generate a secure random token and display it in the console:
-```
-Generated auth token: a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab
-Use this token in the Authorization header: Bearer a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789ab
-```
-
-**Option 2: Custom token via command line (recommended for production)**
+**Option 1: Custom token via command line**
 ```bash
 npx @notionhq/notion-mcp-server --transport http --auth-token "your-secret-token"
 ```
 
-**Option 3: Custom token via environment variable (recommended for production)**
+**Option 2: Custom token via environment variable**
 ```bash
 AUTH_TOKEN="your-secret-token" npx @notionhq/notion-mcp-server --transport http
 ```

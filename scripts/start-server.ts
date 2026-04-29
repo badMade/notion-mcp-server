@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
-import { randomUUID, randomBytes } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import express from 'express'
 
 import { initProxy, ValidationError } from '../src/init-server'
@@ -39,7 +39,7 @@ Usage: notion-mcp-server [options]
 Options:
   --transport <type>     Transport type: 'stdio' or 'http' (default: stdio)
   --port <number>        Port for HTTP server when using Streamable HTTP transport (default: 3000)
-  --auth-token <token>   Bearer token for HTTP transport authentication (optional)
+  --auth-token <token>   Bearer token for HTTP transport authentication (required for http)
   --help, -h             Show this help message
 
 Environment Variables:
@@ -50,9 +50,7 @@ Environment Variables:
 Examples:
   notion-mcp-server                                    # Use stdio transport (default)
   notion-mcp-server --transport stdio                  # Use stdio transport explicitly
-  notion-mcp-server --transport http                   # Use Streamable HTTP transport on port 3000
-  notion-mcp-server --transport http --port 8080       # Use Streamable HTTP transport on port 8080
-  notion-mcp-server --transport http --auth-token mytoken # Use Streamable HTTP transport with custom auth token
+  notion-mcp-server --transport http --auth-token mytoken # Use Streamable HTTP transport with auth token
   AUTH_TOKEN=mytoken notion-mcp-server --transport http # Use Streamable HTTP transport with auth token from env var
 `);
         process.exit(0);
@@ -72,16 +70,16 @@ Examples:
     await proxy.connect(new StdioServerTransport())
     return proxy.getServer()
   } else if (transport === 'http') {
+    const authToken = options.authToken || process.env.AUTH_TOKEN
+    if (!authToken) {
+      console.error('Error: Auth token is required for HTTP transport.')
+      console.error('Provide it via --auth-token <token> or AUTH_TOKEN environment variable.')
+      process.exit(1)
+    }
+
     // Use Streamable HTTP transport
     const app = express()
     app.use(express.json())
-
-    // Generate or use provided auth token (from CLI arg or env var)
-    const authToken = options.authToken || process.env.AUTH_TOKEN || randomBytes(32).toString('hex')
-    if (!options.authToken && !process.env.AUTH_TOKEN) {
-      console.log(`Generated auth token: ${authToken}`)
-      console.log(`Use this token in the Authorization header: Bearer ${authToken}`)
-    }
 
     // Authorization middleware
     const authenticateToken = (req: express.Request, res: express.Response, next: express.NextFunction): void => {
