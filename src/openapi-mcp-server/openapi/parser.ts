@@ -249,12 +249,21 @@ export class OpenAPIToMCPConverter {
     return tools
   }
 
+  private cachedComponentsSchema: Record<string, IJsonSchema> | null = null
+
   private convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+    if (this.cachedComponentsSchema) {
+      return this.cachedComponentsSchema
+    }
+
     const components = this.openApiSpec.components || {}
     const schema: Record<string, IJsonSchema> = {}
     for (const [key, value] of Object.entries(components.schemas || {})) {
+      // Memoize the components conversion so it's not repeatedly executed for every path
       schema[key] = this.convertOpenApiSchemaToJsonSchema(value, new Set())
     }
+
+    this.cachedComponentsSchema = schema
     return schema
   }
   /**
