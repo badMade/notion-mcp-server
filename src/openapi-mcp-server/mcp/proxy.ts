@@ -88,32 +88,39 @@ export class MCPProxy {
         // Execute the operation
         const response = await this.httpClient.executeOperation(operation, params)
 
+        // Log status code for internal observability without exposing it in the public API
+        console.error(`Tool call ${name} succeeded with status ${response.status}`);
+
         // Convert response to MCP format
         return {
           content: [
             {
               type: 'text', // currently this is the only type that seems to be used by mcp server
-              text: JSON.stringify(response.data), // TODO: pass through the http status code text?
+              text: JSON.stringify(response.data),
             },
           ],
         }
       } catch (error) {
-        console.error('Error in tool call', error)
         if (error instanceof HttpClientError) {
-          console.error('HttpClientError encountered, returning structured error', error)
+          // Log specific HTTP error details safely without leaking PII or full request config
+          console.error(`HttpClientError in tool call ${name}: ${error.status} ${error.message}`);
+
           const data = error.data?.response?.data ?? error.data ?? {}
           return {
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
-                  status: 'error', // TODO: get this from http status code?
+                  status: 'error',
                   ...(typeof data === 'object' ? data : { data: data }),
                 }),
               },
             ],
           }
         }
+
+        // Log generic error safely
+        console.error(`Error in tool call ${name}:`, error instanceof Error ? error.message : String(error));
         throw error
       }
     })
