@@ -964,7 +964,7 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
             methods: [
               {
                 name: 'getAB',
-                description: 'Get an A-B object',
+                description: 'Notion | Get an A-B object',
                 // Error responses might not be listed here since none are defined.
                 // Just end the description with no Error Responses section.
                 inputSchema: {
@@ -1047,7 +1047,7 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
               },
               {
                 name: 'createAB',
-                description: 'Create an A-B object',
+                description: 'Notion | Create an A-B object',
                 inputSchema: {
                   type: 'object',
                   properties: {
@@ -1279,7 +1279,7 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
             methods: [
               {
                 name: 'getComposed',
-                description: 'Get a composed resource',
+                description: 'Notion | Get a composed resource',
                 inputSchema: {
                   type: 'object',
                   properties: {},
@@ -1444,5 +1444,229 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
     // Use the custom verification instead of direct equality
     verifyTools(tools, expected.tools)
     expect(openApiLookup).toEqual(expected.openApiLookup)
+  })
+
+  describe('Extensive tests for resolving $ref schemas', () => {
+    it('handles direct self-reference (Node referencing Node)', () => {
+      const spec: any = {
+        openapi: '3.0.0',
+        info: { title: 'Self Reference', version: '1.0.0' },
+        components: {
+          schemas: {
+            Node: {
+              type: 'object',
+              properties: {
+                value: { type: 'string' },
+                next: { $ref: '#/components/schemas/Node' }
+              }
+            }
+          }
+        },
+        paths: {
+          '/node': {
+            get: {
+              operationId: 'getNode',
+              responses: {
+                '200': {
+                  description: 'A node',
+                  content: {
+                    'application/json': {
+                      schema: { $ref: '#/components/schemas/Node' }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const converter = new OpenAPIToMCPConverter(spec)
+      const { tools } = converter.convertToMCPTools()
+      const method = tools.API.methods.find((m) => m.name === 'getNode')
+
+      expect(method).toBeDefined()
+      expect(method?.returnSchema).toBeDefined()
+      expect(method?.returnSchema?.$defs?.Node).toBeDefined()
+      expect((method?.returnSchema?.$defs?.Node as any).properties?.next).toEqual({
+        $ref: '#/$defs/Node'
+      })
+    })
+
+    it('handles mutual recursion (TypeA referencing TypeB and vice versa)', () => {
+      const spec: any = {
+        openapi: '3.0.0',
+        info: { title: 'Mutual Recursion', version: '1.0.0' },
+        components: {
+          schemas: {
+            TypeA: {
+              type: 'object',
+              properties: {
+                b: { $ref: '#/components/schemas/TypeB' }
+              }
+            },
+            TypeB: {
+              type: 'object',
+              properties: {
+                a: { $ref: '#/components/schemas/TypeA' }
+              }
+            }
+          }
+        },
+        paths: {
+          '/ab': {
+            get: {
+              operationId: 'getAB',
+              responses: {
+                '200': {
+                  description: 'A or B',
+                  content: {
+                    'application/json': {
+                      schema: { $ref: '#/components/schemas/TypeA' }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const converter = new OpenAPIToMCPConverter(spec)
+      const { tools } = converter.convertToMCPTools()
+      const method = tools.API.methods.find((m) => m.name === 'getAB')
+
+      expect(method).toBeDefined()
+      expect(method?.returnSchema).toBeDefined()
+      expect(method?.returnSchema?.$defs?.TypeA).toBeDefined()
+      expect((method?.returnSchema?.$defs?.TypeA as any).properties?.b).toEqual({
+        $ref: '#/$defs/TypeB'
+      })
+      expect((method?.returnSchema?.$defs?.TypeB as any).properties?.a).toEqual({
+        $ref: '#/$defs/TypeA'
+      })
+    })
+
+    it('handles deep cyclic references (3+ hop cycle, A -> B -> C -> A)', () => {
+      const spec: any = {
+        openapi: '3.0.0',
+        info: { title: 'Deep Cycle', version: '1.0.0' },
+        components: {
+          schemas: {
+            TypeA: {
+              type: 'object',
+              properties: {
+                b: { $ref: '#/components/schemas/TypeB' }
+              }
+            },
+            TypeB: {
+              type: 'object',
+              properties: {
+                c: { $ref: '#/components/schemas/TypeC' }
+              }
+            },
+            TypeC: {
+              type: 'object',
+              properties: {
+                a: { $ref: '#/components/schemas/TypeA' }
+              }
+            }
+          }
+        },
+        paths: {
+          '/abc': {
+            get: {
+              operationId: 'getABC',
+              responses: {
+                '200': {
+                  description: 'A',
+                  content: {
+                    'application/json': {
+                      schema: { $ref: '#/components/schemas/TypeA' }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const converter = new OpenAPIToMCPConverter(spec)
+      const { tools } = converter.convertToMCPTools()
+      const method = tools.API.methods.find((m) => m.name === 'getABC')
+
+      expect(method).toBeDefined()
+      expect(method?.returnSchema).toBeDefined()
+      expect(method?.returnSchema?.$defs?.TypeA).toBeDefined()
+      expect(method?.returnSchema?.$defs?.TypeB).toBeDefined()
+      expect(method?.returnSchema?.$defs?.TypeC).toBeDefined()
+
+      expect((method?.returnSchema?.$defs?.TypeA as any).properties?.b).toEqual({
+        $ref: '#/$defs/TypeB'
+      })
+      expect((method?.returnSchema?.$defs?.TypeB as any).properties?.c).toEqual({
+        $ref: '#/$defs/TypeC'
+      })
+      expect((method?.returnSchema?.$defs?.TypeC as any).properties?.a).toEqual({
+        $ref: '#/$defs/TypeA'
+      })
+    })
+
+    it('handles control case of non-cyclic nested schema', () => {
+      const spec: any = {
+        openapi: '3.0.0',
+        info: { title: 'Nested', version: '1.0.0' },
+        components: {
+          schemas: {
+            Parent: {
+              type: 'object',
+              properties: {
+                child: { $ref: '#/components/schemas/Child' }
+              }
+            },
+            Child: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' }
+              }
+            }
+          }
+        },
+        paths: {
+          '/parent': {
+            get: {
+              operationId: 'getParent',
+              responses: {
+                '200': {
+                  description: 'Parent',
+                  content: {
+                    'application/json': {
+                      schema: { $ref: '#/components/schemas/Parent' }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const converter = new OpenAPIToMCPConverter(spec)
+      const { tools } = converter.convertToMCPTools()
+      const method = tools.API.methods.find((m) => m.name === 'getParent')
+
+      expect(method).toBeDefined()
+      expect(method?.returnSchema).toBeDefined()
+      expect(method?.returnSchema?.$defs?.Parent).toBeDefined()
+      expect(method?.returnSchema?.$defs?.Child).toBeDefined()
+
+      expect((method?.returnSchema?.$defs?.Parent as any).properties?.child).toEqual({
+        $ref: '#/$defs/Child'
+      })
+      expect((method?.returnSchema?.$defs?.Child as any).properties?.name).toEqual({
+        type: 'string'
+      })
+    })
   })
 })
