@@ -1446,3 +1446,59 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
     expect(openApiLookup).toEqual(expected.openApiLookup)
   })
 })
+
+
+describe('convertComponentsToJsonSchema performance and caching', () => {
+  it('should cache components schema and return frozen objects', () => {
+    const converter = new OpenAPIToMCPConverter({
+      openapi: '3.0.0',
+      info: { title: 'Test', version: '1.0.0' },
+      paths: {},
+      components: {
+        schemas: {
+          User: { type: 'object', properties: { id: { type: 'string' } } }
+        }
+      }
+    } as any)
+    const schema1 = (converter as any).convertComponentsToJsonSchema()
+    const schema2 = (converter as any).convertComponentsToJsonSchema()
+
+    expect(schema1).toBe(schema2)
+    expect(Object.isFrozen(schema1)).toBe(true)
+
+    expect(() => {
+      'use strict';
+      // @ts-ignore
+      schema1['NewKey'] = {}
+    }).toThrow()
+  })
+
+  it('should maintain separate caches for different converter instances', () => {
+    const converter1 = new OpenAPIToMCPConverter({
+      openapi: '3.0.0',
+      info: { title: 'Test', version: '1.0.0' },
+      paths: {},
+      components: {
+        schemas: {
+          User: { type: 'object', properties: { id: { type: 'string' } } }
+        }
+      }
+    } as any)
+    const converter2 = new OpenAPIToMCPConverter({
+      openapi: '3.0.0',
+      info: { title: 'Test', version: '1.0.0' },
+      paths: {},
+      components: {
+        schemas: {
+          User: { type: 'object', properties: { id: { type: 'string' } } }
+        }
+      }
+    } as any)
+
+    const schema1 = (converter1 as any).convertComponentsToJsonSchema()
+    const schema2 = (converter2 as any).convertComponentsToJsonSchema()
+
+    expect(schema1).not.toBe(schema2)
+    expect(schema1).toEqual(schema2)
+  })
+})
