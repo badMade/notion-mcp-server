@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import yaml from 'js-yaml'
 
 import { OpenAPIV3 } from 'openapi-types'
 import OpenAPISchemaValidator from 'openapi-schema-validator'
@@ -24,11 +25,16 @@ async function loadOpenApiSpec(specPath: string, baseUrl: string | undefined): P
   }
 
   // Parse and validate the OpenApi Spec
+  let parsed: any
   try {
-    const parsed = JSON.parse(rawSpec)
+    if (specPath.endsWith('.yaml') || specPath.endsWith('.yml')) {
+      parsed = yaml.load(rawSpec)
+    } else {
+      parsed = JSON.parse(rawSpec)
+    }
 
     // Override baseUrl if specified.
-    if (baseUrl) {
+    if (baseUrl && parsed && parsed.servers && parsed.servers[0]) {
       parsed.servers[0].url = baseUrl
     }
 
