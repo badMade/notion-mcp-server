@@ -3,6 +3,32 @@ import type { JSONSchema7 as IJsonSchema } from 'json-schema'
 import type { ChatCompletionTool } from 'openai/resources/chat/completions'
 import type { Tool } from '@anthropic-ai/sdk/resources/messages/messages'
 
+/**
+ * Recursively freeze an object and all its properties.
+ * @param obj The object to freeze
+ * @returns The frozen object
+ */
+function deepFreeze<T>(obj: T): T {
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+
+  if (Object.isFrozen(obj)) {
+    return obj;
+  }
+
+  // Freeze properties before freezing self
+  for (const key of Reflect.ownKeys(obj)) {
+    const prop = (obj as any)[key];
+    if (typeof prop === 'object' && prop !== null) {
+      deepFreeze(prop);
+    }
+  }
+
+  return Object.freeze(obj);
+}
+
+
 type NewToolMethod = {
   name: string
   description: string
@@ -19,6 +45,7 @@ type FunctionParameters = {
 
 export class OpenAPIToMCPConverter {
   private schemaCache: Record<string, IJsonSchema> = {}
+  private componentsCache: Record<string, IJsonSchema> | null = null
   private nameCounter: number = 0
 
   constructor(private openApiSpec: OpenAPIV3.Document | OpenAPIV3_1.Document) {}
@@ -249,13 +276,26 @@ export class OpenAPIToMCPConverter {
     return tools
   }
 
-  private convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+  /**
+   * Converts the components from the OpenAPI spec to a JSON schema dictionary.
+   * Caches the result to avoid redundant expensive computations across operations.
+   * Modifying the OpenAPI spec after instantiation is not supported.
+   * The returned schema is deeply frozen to prevent caller mutation.
+   */
+  public convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+    if (this.componentsCache) {
+      return this.componentsCache
+    }
+
     const components = this.openApiSpec.components || {}
     const schema: Record<string, IJsonSchema> = {}
     for (const [key, value] of Object.entries(components.schemas || {})) {
       schema[key] = this.convertOpenApiSchemaToJsonSchema(value, new Set())
     }
-    return schema
+
+    // Freeze the cached components schema to prevent callers from mutating the shared state
+    this.componentsCache = deepFreeze(schema)
+    return this.componentsCache
   }
   /**
    * Helper method to convert an operation to a JSON Schema for parameters
