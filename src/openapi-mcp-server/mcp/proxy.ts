@@ -98,9 +98,9 @@ export class MCPProxy {
           ],
         }
       } catch (error) {
-        console.error('Error in tool call', error)
+        if (process.env.DEBUG) console.error('Error in tool call', error instanceof Error ? error.message : String(error))
         if (error instanceof HttpClientError) {
-          console.error('HttpClientError encountered, returning structured error', error)
+          if (process.env.DEBUG) console.error('HttpClientError encountered, returning structured error', error.message)
           const data = error.data?.response?.data ?? error.data ?? {}
           return {
             content: [
@@ -130,14 +130,14 @@ export class MCPProxy {
       try {
         const headers = JSON.parse(headersJson)
         if (typeof headers !== 'object' || headers === null) {
-          console.warn('OPENAPI_MCP_HEADERS environment variable must be a JSON object, got:', typeof headers)
+          if (process.env.DEBUG) console.warn('OPENAPI_MCP_HEADERS environment variable must be a JSON object, got:', typeof headers)
         } else if (Object.keys(headers).length > 0) {
           // Only use OPENAPI_MCP_HEADERS if it contains actual headers
           return headers
         }
         // If OPENAPI_MCP_HEADERS is empty object, fall through to try NOTION_TOKEN
       } catch (error) {
-        console.warn('Failed to parse OPENAPI_MCP_HEADERS environment variable:', error)
+        if (process.env.DEBUG) console.warn('Failed to parse OPENAPI_MCP_HEADERS environment variable:', error instanceof Error ? error.message : String(error))
         // Fall through to try NOTION_TOKEN
       }
     }

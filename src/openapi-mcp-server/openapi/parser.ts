@@ -63,7 +63,7 @@ export class OpenAPIToMCPConverter {
             ...('description' in schema ? { description: schema.description as string } : {}),
           }
         }
-        console.error(`Attempting to resolve ref ${ref} not found in components collection.`)
+        if (process.env.DEBUG) console.error(`Attempting to resolve ref ${ref} not found in components collection.`)
         // deliberate fall through
       }
       // Create base schema with $ref and description if present
@@ -80,7 +80,7 @@ export class OpenAPIToMCPConverter {
       const resolved = this.internalResolveRef(ref, resolvedRefs)
       if (!resolved) {
         // TODO: need extensive tests for this and we definitely need to handle the case of self references
-        console.error(`Failed to resolve ref ${ref}`)
+        if (process.env.DEBUG) console.error(`Failed to resolve ref ${ref}`)
         return {
           $ref: ref.replace(/^#\/components\/schemas\//, '#/$defs/'),
           description: 'description' in schema ? ((schema.description as string) ?? '') : '',
@@ -361,7 +361,7 @@ export class OpenAPIToMCPConverter {
 
   private convertOperationToMCPMethod(operation: OpenAPIV3.OperationObject, method: string, path: string): NewToolMethod | null {
     if (!operation.operationId) {
-      console.warn(`Operation without operationId at ${method} ${path}`)
+      if (process.env.DEBUG) console.warn(`Operation without operationId at ${method} ${path}`)
       return null
     }
 
@@ -463,7 +463,7 @@ export class OpenAPIToMCPConverter {
         ...(returnSchema ? { returnSchema } : {}),
       }
     } catch (error) {
-      console.warn(`Failed to generate Zod schema for ${methodName}:`, error)
+      if (process.env.DEBUG) console.warn(`Failed to generate Zod schema for ${methodName}:`, error instanceof Error ? error.message : String(error))
       // Fallback to a basic object schema
       return {
         name: methodName,

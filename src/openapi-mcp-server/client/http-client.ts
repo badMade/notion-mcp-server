@@ -177,7 +177,7 @@ export class HttpClient {
       }
     } catch (error: any) {
       if (error.response) {
-        console.error('Error in http client', error)
+        if (process.env.DEBUG) console.error('Error in http client', error instanceof Error ? error.message : String(error), error.response?.status ? `(Status: ${error.response.status})` : '')
         const headers = new Headers()
         Object.entries(error.response.headers).forEach(([key, value]) => {
           if (value) headers.append(key, value.toString())
