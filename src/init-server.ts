@@ -13,7 +13,7 @@ export class ValidationError extends Error {
   }
 }
 
-async function loadOpenApiSpec(specPath: string, baseUrl: string | undefined): Promise<OpenAPIV3.Document> {
+export async function loadOpenApiSpec(specPath: string, baseUrl: string | undefined): Promise<OpenAPIV3.Document> {
   let rawSpec: string
 
   try {
