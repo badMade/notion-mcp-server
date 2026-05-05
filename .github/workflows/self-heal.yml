@@ -1,0 +1,107 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    steps:
+      - name: Check for duplicate open PR
+        id: pr_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal --state open --json number | jq '. | length')
+          if [ "$count" -gt 0 ]; then
+            echo "Duplicate self-heal PR exists. Exiting."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Run Self-Heal Pipeline
+        id: heal
+        run: |
+          node scripts/self_heal.mjs
+
+      - name: Post-run Healthcheck Check
+        if: always()
+        run: |
+          node scripts/healthcheck.mjs
+
+      - name: Verify Scope Gates
+        id: gates
+        run: |
+          # Ensure there are changes
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes found."
+            exit 1
+          fi
+
+          # Prevent modification of forbidden files (ci/self-heal workflows)
+          if git diff --name-only | grep -qE "^.github/workflows/(ci\.yml|self-heal\.yml)$"; then
+            echo "Forbidden file modification detected."
+            exit 1
+          fi
+
+          # Simple secret check entropy proxy
+          if git diff | grep -iqE "(api_key|secret|token|password) *="; then
+            echo "Potential secret leak in diff detected."
+            exit 1
+          fi
+
+      - name: Create Pull Request
+        if: steps.gates.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b $BRANCH_NAME
+          git add .
+
+          TITLE="[Self-Heal Manual] Repair"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          fi
+
+          git commit -m "$TITLE"
+
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Self-healing pipeline completed. Review artifacts and verify fixes. Initiated by: ${{ github.event_name }}" \
+            --label "self-heal" \
+            --label "automation"
