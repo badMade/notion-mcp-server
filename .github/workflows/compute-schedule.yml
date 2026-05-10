@@ -1,0 +1,117 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: computeschedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need full history for telemetry
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Close Stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close schedule PRs older than 7 days
+          STALE_DATE=$(date -d "7 days ago" -I)
+          gh pr list --label self-heal-schedule --state open --search "created:<$STALE_DATE" --json number --jq '.[].number' | while read pr; do
+            gh pr close "$pr" -c "Closing stale self-heal schedule PR"
+          done
+
+      - name: Check for Duplicate Open PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number --jq 'length')
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "duplicate_exists=true" >> $GITHUB_OUTPUT
+            echo "Found open schedule PRs. Skipping to prevent duplicates."
+          else
+            echo "duplicate_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Dependencies
+        if: steps.check_pr.outputs.duplicate_exists == 'false'
+        run: npm ci
+
+      - name: Compute New Schedule
+        id: compute
+        if: steps.check_pr.outputs.duplicate_exists == 'false'
+        run: node scripts/compute_schedule.mjs > compute.log 2>&1 || true
+        continue-on-error: true
+
+      - name: Upload Compute Log
+        if: steps.check_pr.outputs.duplicate_exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compute-log
+          path: compute.log
+          retention-days: 7
+
+      - name: Check Diff
+        id: check_diff
+        if: steps.check_pr.outputs.duplicate_exists == 'false'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.compute.outcome == 'success' && steps.check_diff.outputs.has_diff == 'true' && steps.check_pr.outputs.duplicate_exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH_NAME"
+          git add .
+          git commit -m "Auto-update self-heal schedule"
+          git push -u origin "$BRANCH_NAME"
+
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          CURRENT_SCHEDULE="Unknown"
+          RATIONALE="Unknown"
+          if [ -f .github/self-heal-schedule.yml ]; then
+            CURRENT_SCHEDULE=$(grep "^schedule:" .github/self-heal-schedule.yml | cut -d"'" -f2)
+            RATIONALE=$(grep "^rationale:" .github/self-heal-schedule.yml | cut -d" " -f2-)
+          fi
+
+          cat << EOF > pr_body.txt
+          Automated update to the self-healing schedule based on recent repository telemetry.
+
+          **New Schedule:** \`$CURRENT_SCHEDULE\`
+          **Rationale:** $RATIONALE
+
+          Review carefully.
+
+          **Logs:** [View Actions Run]($RUN_URL)
+          EOF
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body-file pr_body.txt --label "self-heal-schedule"
