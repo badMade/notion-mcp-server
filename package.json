@@ -40,8 +40,11 @@
     "@types/which": "^3.0.4",
     "@vitest/coverage-v8": "3.1.1",
     "esbuild": "^0.25.2",
+    "eslint": "^10.3.0",
+    "js-yaml": "^4.1.1",
     "multer": "1.4.5-lts.1",
     "openai": "^4.91.1",
+    "prettier": "^3.8.3",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vitest": "^3.1.1"
@@ -56,5 +59,9 @@
   "bugs": {
     "url": "https://github.com/makenotion/notion-mcp-server/issues"
   },
-  "homepage": "https://github.com/makenotion/notion-mcp-server#readme"
+  "homepage": "https://github.com/makenotion/notion-mcp-server#readme",
+  "selfhealDependencies": {
+    "js-yaml": "^4.1.0",
+    "prettier": "^3.0.0"
+  }
 }
