@@ -1,0 +1,111 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: '0 0 1 * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"] # Ensure this matches your main CI workflow name
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    # Trigger conditions:
+    # 1. Scheduled (only on main)
+    # 2. workflow_dispatch (manual)
+    # 3. workflow_run (only if it failed)
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need full history for telemetry if needed
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Or your project's version
+          cache: 'npm'
+
+      - name: Prevent duplicate PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Look for open PRs with the self-heal label created recently
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number | jq '. | length')
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "Open self-heal PR already exists. Skipping repair."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Auto-Repair Pipeline
+        id: repair
+        if: steps.check_pr.outputs.skip == 'false'
+        run: |
+          # Run the idempotent repair script
+          # Exits 0 if fixed + diff created. Exits 1 otherwise.
+          node scripts/self_heal.mjs
+
+      - name: Check for secrets/drift (Gate)
+        id: gate
+        if: steps.check_pr.outputs.skip == 'false' && success()
+        run: |
+          # Basic gate checking
+          if git diff --name-only | grep -qE "(\.env|secrets/|\.github/workflows/ci\.yml)"; then
+            echo "Forbidden files modified. Aborting."
+            exit 1
+          fi
+
+          # Only add specific allowed files/directories
+          git add src/ tests/ package.json package-lock.json scripts/ || true
+
+          if git diff --staged --quiet; then
+             echo "No allowed changes to commit. Aborting."
+             exit 1
+          fi
+
+      - name: Create PR
+        if: steps.check_pr.outputs.skip == 'false' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "chore: auto-repair project health"
+          git push -u origin "$BRANCH_NAME"
+
+          # Determine trigger type for title
+          TRIGGER_TYPE="Manual"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TRIGGER_TYPE="Scheduled"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TRIGGER_TYPE="Reactive"
+          fi
+
+          PR_TITLE="[Self-Heal $TRIGGER_TYPE] Repair project health"
+          PR_BODY="This PR was auto-generated to repair project health. \n\nTrigger: $TRIGGER_TYPE\nReview the changes to ensure they are correct before merging."
+
+          gh pr create --title "$PR_TITLE" --body "$PR_BODY" --label "self-heal" --label "automation"
