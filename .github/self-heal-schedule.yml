@@ -1,0 +1,6 @@
+schedule: "0 2 * * *" # AUTO-UPDATED
+rationale: >
+  Initial default schedule (daily at 2 AM UTC) based on bootstrap telemetry assumptions.
+  This value will be re-evaluated and updated automatically by the compute_schedule workflow
+  based on PR velocity and CI failure rates.
+last_updated: "2025-05-15T00:00:00Z"
