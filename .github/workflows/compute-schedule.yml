@@ -1,0 +1,90 @@
+name: Recompute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Weekly on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: github.repository == github.event.repository.full_name
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Check for recent open Schedule PRs
+        id: check_prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number --jq length)
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "Found $OPEN_PRS open self-heal-schedule PR(s). Skipping to avoid thrash."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Dependencies
+        if: steps.check_prs.outputs.skip == 'false'
+        run: npm ci
+
+      - name: Run Schedule Computation
+        if: steps.check_prs.outputs.skip == 'false'
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./scripts/compute_schedule.mjs
+
+          # Check if the schedule YAML changed
+          if ! git diff --quiet .github/self-heal-schedule.yml; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+
+            # Use sed to update the workflow cron to match the new schedule
+            NEW_CRON=$(grep -oP '(?<=schedule: ")[^"]+' .github/self-heal-schedule.yml)
+            sed -i "s/cron: \".*\" # AUTO-UPDATED/cron: \"$NEW_CRON\" # AUTO-UPDATED/" .github/workflows/self-heal.yml
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Pull Request
+        if: steps.check_prs.outputs.skip == 'false' && steps.compute.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+
+          git commit -m "Auto-update self-heal schedule based on telemetry"
+          git push -u origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated update to the self-heal schedule based on recent repository telemetry (PR velocity, CI failure rate). Review the rationale in \`.github/self-heal-schedule.yml\`." \
+            --label "self-heal-schedule" \
+            --label "automation"

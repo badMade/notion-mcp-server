@@ -1,0 +1,129 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # AUTO-UPDATED
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    if: >
+      github.repository == github.event.repository.full_name &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'schedule' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Check for recent open Self-Heal PRs
+        id: check_prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close stale self-heal PRs (e.g., older than 7 days) - Optional cleanup
+          # Check for existing open PRs
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number --jq length)
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "Found $OPEN_PRS open self-heal PR(s). Skipping repair to avoid duplicates."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Dependencies
+        if: steps.check_prs.outputs.skip == 'false'
+        run: npm ci
+
+      - name: Pre-Repair Healthcheck
+        if: steps.check_prs.outputs.skip == 'false'
+        continue-on-error: true
+        run: ./scripts/healthcheck.mjs > pre-healthcheck.log 2>&1
+
+      - name: Run Self-Heal Pipeline
+        if: steps.check_prs.outputs.skip == 'false'
+        id: selfheal
+        run: |
+          # Script exits 0 ONLY if healthcheck passes AND there's a diff
+          ./scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Ensure specific files only
+        if: steps.check_prs.outputs.skip == 'false' && steps.selfheal.outcome == 'success'
+        run: |
+          # Security Gate: Ensure no secrets or restricted files are modified
+          if git diff --name-only | grep -E '(\.env|secrets/|\.github/workflows/ci\.yml)'; then
+            echo "::error::Forbidden files modified. Aborting."
+            exit 1
+          fi
+          # Check for entropy (very basic API key guard)
+          if git diff | grep -E -i '(bearer|token|api_key|secret|password)["'\'']?\s*[:=]\s*["'\''][a-zA-Z0-9_\-]{16,}["'\'']'; then
+             echo "::error::Potential secret leak detected in diff. Aborting."
+             exit 1
+          fi
+
+      - name: Create Pull Request
+        if: steps.check_prs.outputs.skip == 'false' && steps.selfheal.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          # Only stage allowed changes (source code, tests, configs).
+          # Explicitly avoid adding .github/workflows/ci.yml
+          git add package*.json src/ tests/ .github/self-heal-schedule.yml || true
+
+          git commit -m "Auto-repair codebase drift and formatting"
+          git push -u origin $BRANCH_NAME
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+            TRIGGER="Scheduled run"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+            TRIGGER="CI Failure on run ${{ github.event.workflow_run.id }}"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+            TRIGGER="Manual dispatch"
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Automated code repair triggered by: $TRIGGER. Please review changes before merging." \
+            --label "self-heal" \
+            --label "automation"
+
+      - name: Upload Logs
+        if: always() && steps.check_prs.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-healthcheck.log
+            repair.log
