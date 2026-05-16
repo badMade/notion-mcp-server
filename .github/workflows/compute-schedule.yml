@@ -1,0 +1,109 @@
+name: Self-Heal Schedule Recomputation
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Recompute weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  recompute:
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for meaningful git diff
+        id: check_diff
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Oscillation Guard
+        id: oscillation_guard
+        run: |
+          # Only run the PR creation if the schedule file wasn't recently updated
+          # to prevent thrashing
+          if [ -f .github/self-heal-schedule.yml ]; then
+            LAST_UPDATE=$(grep -oP "last_updated: '\K[^']+" .github/self-heal-schedule.yml || echo "")
+            if [ -n "$LAST_UPDATE" ]; then
+              # Calculate time difference in seconds
+              LAST_UPDATE_SEC=$(date -d "$LAST_UPDATE" +%s)
+              NOW_SEC=$(date +%s)
+              DIFF_SEC=$((NOW_SEC - LAST_UPDATE_SEC))
+
+              # 24 hours = 86400 seconds
+              if [ "$DIFF_SEC" -lt 86400 ]; then
+                echo "Schedule was updated less than 24 hours ago. Skipping update to prevent oscillation."
+                echo "skip=true" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Create PR if schedule changed
+        if: steps.check_diff.outputs.has_diff == 'true' && steps.oscillation_guard.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-${{ github.run_id }}"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only add specific safe paths.
+          git add .github/self-heal-schedule.yml
+
+          if git diff --staged --quiet; then
+            echo "No allowed files were modified."
+            exit 0
+          fi
+
+          # Update the self-heal.yml workflow safely using the helper script
+          node scripts/update_schedule_workflow.mjs
+          git add .github/workflows/self-heal.yml
+
+          git checkout -b $BRANCH_NAME
+          git commit -m "[Self-Heal Schedule] Update cadence"
+
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number --jq 'length')
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "An open schedule update PR already exists. Aborting."
+            exit 0
+          fi
+
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated self-healing schedule update based on recent repository telemetry. Please review and merge." \
+            --label "self-heal-schedule,automation" \
+            --base main
