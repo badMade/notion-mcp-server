@@ -1,0 +1,69 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly on Sunday
+  workflow_dispatch:
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Compute Schedule
+        run: |
+          node scripts/compute_schedule.mjs || true
+
+      - name: Create PR if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Schedule is unchanged."
+            exit 0
+          fi
+
+          # Only stage schedule config and the self-heal workflow
+          git reset
+          git add .github/self-heal-schedule.yml 2>/dev/null || true
+          git add .github/workflows/self-heal.yml 2>/dev/null || true
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No relevant files modified."
+            exit 0
+          fi
+
+          # Avoid duplicate PRs
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number -q '.[].number')
+          if [ ! -z "$OPEN_PRS" ]; then
+             echo "An open schedule update PR already exists. Aborting."
+             exit 0
+          fi
+
+          BRANCH="selfheal-schedule-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+          git commit -m "[Self-Heal Schedule] Update cadence"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated update of self-heal schedule based on telemetry." \
+            --label "automation,self-heal-schedule" \
+            --base main \
+            --head "$BRANCH"
