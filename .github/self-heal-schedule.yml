@@ -1,0 +1,3 @@
+schedule: "0 0 * * *"
+rationale: "low-churn velocity (>0 commits/wk)"
+last_computed: "2024-05-18T12:00:00.000Z"
