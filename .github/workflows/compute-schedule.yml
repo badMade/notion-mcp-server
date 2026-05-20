@@ -1,0 +1,68 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 1 * * 0" # Runs weekly to evaluate if schedule needs to change
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for Schedule Changes
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain .github/self-heal-schedule.yml .github/workflows/self-heal.yml)" ]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR for Schedule Change
+        if: steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Avoid duplicates
+          if gh pr list --label "self-heal-schedule" --state open --json headRefName | grep -q "schedule-update-"; then
+             echo "A schedule update PR is already open. Skipping."
+             exit 0
+          fi
+
+          BRANCH_NAME="schedule-update-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "chore: update self-heal cadence"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-healing pipeline schedule based on recent repository telemetry." \
+            --label "self-heal-schedule" \
+            --label "automation"
