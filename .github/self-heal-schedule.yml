@@ -1,0 +1,4 @@
+# AUTO-UPDATED
+schedule: "0 0 * * *"
+rationale: "Bootstrap default schedule (daily at midnight UTC)"
+last_updated: "2024-05-21T00:00:00Z"
