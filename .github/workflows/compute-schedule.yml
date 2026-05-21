@@ -1,0 +1,88 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly run on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    if: !startsWith(github.ref_name, 'selfheal-schedule-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs > compute_schedule.log 2>&1 || true
+          cat compute_schedule.log
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes in schedule."
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+
+      - name: Guard against duplicate PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ steps.compute.outputs.has_diff }}" != "true" ]; then
+            exit 0
+          fi
+
+          open_prs=$(gh pr list --label self-heal-schedule --state open --json number -q '.[].number')
+          if [ -n "$open_prs" ]; then
+            echo "An open self-heal-schedule PR already exists. Skipping PR creation."
+            echo "create_pr=false" >> $GITHUB_OUTPUT
+          else
+            echo "create_pr=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Pull Request
+        if: steps.compute.outputs.has_diff == 'true' && steps.check_pr.outputs.create_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git commit -a -m "Update self-heal schedule cadence based on telemetry"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-heal schedule based on telemetry." \
+            --label "self-heal-schedule" \
+            --label "automation"
