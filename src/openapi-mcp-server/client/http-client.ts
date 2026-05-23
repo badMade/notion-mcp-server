@@ -177,7 +177,12 @@ export class HttpClient {
       }
     } catch (error: any) {
       if (error.response) {
-        console.error('Error in http client', error)
+        // Log safe properties instead of full error to prevent leaking secrets in config/headers
+        console.error('Error in http client', {
+          message: error.message,
+          name: error.name,
+          status: error.response?.status,
+        })
         const headers = new Headers()
         Object.entries(error.response.headers).forEach(([key, value]) => {
           if (value) headers.append(key, value.toString())
