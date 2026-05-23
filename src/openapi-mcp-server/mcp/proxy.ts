@@ -97,10 +97,18 @@ export class MCPProxy {
             },
           ],
         }
-      } catch (error) {
-        console.error('Error in tool call', error)
+      } catch (error: any) {
+        // Log safe properties instead of full error to prevent leaking secrets in config/headers
+        console.error('Error in tool call', {
+          message: error.message,
+          name: error.name,
+          status: error.response?.status || (error instanceof HttpClientError ? error.status : undefined),
+        })
         if (error instanceof HttpClientError) {
-          console.error('HttpClientError encountered, returning structured error', error)
+          console.error('HttpClientError encountered, returning structured error', {
+            message: error.message,
+            status: error.status,
+          })
           const data = error.data?.response?.data ?? error.data ?? {}
           return {
             content: [
