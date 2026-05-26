@@ -1,0 +1,98 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly to evaluate cadence
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    name: Re-evaluate Cadence
+    runs-on: ubuntu-latest
+    if: github.ref_name == github.event.repository.default_branch
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute optimal schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Re-evaluate schedule based on repository telemetry.
+          # Edits .github/self-heal-schedule.yml safely using js-yaml.
+          node scripts/compute_schedule.mjs
+
+      - name: Apply schedule to self-heal.yml workflow
+        run: |
+          if ! git diff --quiet .github/self-heal-schedule.yml; then
+            NEW_CRON=$(grep -E '^schedule:' .github/self-heal-schedule.yml | awk -F'"' '{print $2}')
+            if [ -n "$NEW_CRON" ]; then
+              sed -i "s|cron: \".*\" # AUTO-UPDATED|cron: \"$NEW_CRON\" # AUTO-UPDATED|" .github/workflows/self-heal.yml
+            fi
+          fi
+
+      - name: Check for duplicate open schedule PRs
+        id: pr-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PR_COUNT=$(gh pr list --label "self-heal-schedule" --state open --json number | jq length)
+          if [ "$OPEN_PR_COUNT" -gt 0 ]; then
+            echo "duplicate_found=true" >> $GITHUB_OUTPUT
+            echo "A schedule update PR is already open. Skipping."
+          else
+            echo "duplicate_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Schedule Update PR
+        if: steps.pr-check.outputs.duplicate_found == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet; then
+            echo "Schedule is already optimal. No changes needed."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-schedule-$(date +%Y%m%d%H%M%S)"
+          git checkout -b "$BRANCH_NAME"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Auto-adjust: Update self-healing cadence"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "### Automated Cadence Adjustment ⏱️🔄
+
+            Based on recent repository activity telemetry, the autonomous system has computed a new optimal schedule for the self-healing CI pipeline.
+
+            This ensures the pipeline runs frequently during periods of high activity, and enters a dormant, low-cost state during quiet periods.
+
+            *You may safely merge this to apply the new schedule.*" \
+            --label "self-heal-schedule,automation"
