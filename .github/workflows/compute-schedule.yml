@@ -1,0 +1,74 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Run weekly on Sunday to re-evaluate schedule
+  workflow_dispatch:
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Update workflow YAML
+        run: |
+          NEW_CRON=$(node -e 'const yaml=require("js-yaml"); const fs=require("fs"); console.log(yaml.load(fs.readFileSync(".github/self-heal-schedule.yml")).schedule)')
+          if [ ! -z "$NEW_CRON" ]; then
+            sed -i "s|.*cron:.*# AUTO-UPDATED|    - cron: \"$NEW_CRON\" # AUTO-UPDATED|" .github/workflows/self-heal.yml
+          fi
+
+      - name: Check for duplicate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open. Skipping run to avoid duplicates."
+            exit 0
+          fi
+
+      - name: Create Pull Request if Changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+
+            BRANCH_NAME="selfheal-schedule-$(date +%s)"
+            git checkout -b $BRANCH_NAME
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(self-heal): update self-heal pipeline schedule based on telemetry"
+            git push origin $BRANCH_NAME
+
+            gh pr create \
+              --title "[Self-Heal Schedule] Update cadence" \
+              --body "Automated PR to adjust the Self-Heal pipeline schedule based on recent project activity." \
+              --label "automation,self-heal-schedule" \
+              --base main \
+              --head $BRANCH_NAME
+          else
+            echo "Schedule is unchanged."
+          fi
