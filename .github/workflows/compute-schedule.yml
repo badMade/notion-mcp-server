@@ -1,0 +1,72 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 2 * * 0" # Runs every Sunday at 2 AM
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+
+  compute-schedule:
+    timeout-minutes: 5
+
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs > compute.log 2>&1
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "diff=true" >> $GITHUB_OUTPUT
+            git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
+          else
+            echo "diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Schedule Update PR
+        if: steps.compute.outputs.diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Recent schedule update PR exists. Skipping creation."
+            exit 0
+          fi
+
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -m "Automated schedule update based on telemetry"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-healing schedule based on repository telemetry." \
+            --label "automation,self-heal-schedule" \
+            --base main \
+            --head "$BRANCH"
