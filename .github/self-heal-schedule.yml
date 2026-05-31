@@ -1,0 +1,3 @@
+schedule: "0 0 * * 1"
+rationale: "Initial fallback schedule due to low commit volume. Computed by self-healing automation."
+LAST_UPDATED: "2025-05-31T00:00:00Z"
