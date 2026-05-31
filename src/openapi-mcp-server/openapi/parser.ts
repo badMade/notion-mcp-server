@@ -437,7 +437,7 @@ export class OpenAPIToMCPConverter {
         .filter(([code]) => code.startsWith('4') || code.startsWith('5'))
         .map(([code, response]) => {
           const responseObj = this.resolveResponse(response)
-          let errorDesc = responseObj?.description || ''
+          const errorDesc = responseObj?.description || ''
           return `${code}: ${errorDesc}`
         })
 
