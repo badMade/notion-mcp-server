@@ -1,0 +1,4 @@
+schedule: "0 0 * * 0" # AUTO-UPDATED
+rationale: |
+  Initial default schedule set to run once a week because telemetry indicated very low commit activity.
+last_updated: 2025-08-22T11:58:57.000Z
