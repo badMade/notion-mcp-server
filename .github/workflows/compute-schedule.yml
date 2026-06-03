@@ -1,0 +1,98 @@
+name: Compute Schedule Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly to re-evaluate schedule
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Duplicate PR Check
+        id: check-dup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Open self-heal-schedule PR found. Skipping run."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute New Schedule
+        if: steps.check-dup.outputs.duplicate == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Update Workflow with sed Fallback
+        if: steps.check-dup.outputs.duplicate == 'false'
+        run: |
+          NEW_SCHED=$(grep "SELFHEAL_SCHEDULE" .github/self-heal-schedule.yml | awk -F': ' '{print $2}' | tr -d "'" | tr -d '"' | sed 's/ # AUTO-UPDATED//')
+          if [ -n "$NEW_SCHED" ]; then
+             sed -i "s|cron:.*# AUTO-UPDATED|cron: '$NEW_SCHED' # AUTO-UPDATED|" .github/workflows/self-heal.yml
+          fi
+
+      - name: Check Diff
+        id: diff
+        if: steps.check-dup.outputs.duplicate == 'false'
+        run: |
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml 2>/dev/null || true
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure Git
+        if: steps.diff.outputs.has_changes == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create PR
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "chore: update self-heal cadence via telemetry"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Auto-generated PR to update the self-heal pipeline schedule based on repository telemetry." \
+            --label "self-heal-schedule,automation" \
+            --base main
