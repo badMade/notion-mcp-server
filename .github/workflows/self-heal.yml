@@ -1,0 +1,137 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    if: |
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      )
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Tools
+        run: |
+          npm ci
+
+      - name: Cleanup Stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -d "7 days ago" +%Y-%m-%d)
+          gh pr list --label self-heal --search "created:<$DATE" --json number --jq '.[].number' | xargs -I {} gh pr close {} --comment "Closing stale self-heal PR" || true
+
+      - name: Guard against Duplicate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt --jq '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A self-heal PR is already open. Exiting to prevent duplication."
+            exit 0
+          fi
+
+      - name: Pre-Repair Healthcheck
+        run: |
+          node scripts/healthcheck.mjs > pre-check.log 2>&1 || true
+
+      - name: Run Idempotent Repair Pipeline
+        id: repair
+        run: |
+          node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-Repair Healthcheck
+        if: steps.repair.outcome == 'success'
+        run: |
+          node scripts/healthcheck.mjs > post-check.log 2>&1
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+
+      - name: Check Diff & Entropy
+        if: steps.repair.outcome == 'success'
+        id: diff
+        run: |
+          git status --porcelain
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No diff found. Exiting."
+            exit 0
+          fi
+
+          # Stage specific allowed paths
+          for path in src/ tests/ package.json package-lock.json eslint.config.mjs; do
+            git add "$path" 2>/dev/null || true
+          done
+
+          if grep -iE '(key|token|secret|password|bearer).*[0-9a-zA-Z]{16,}' $(git diff --name-only --cached); then
+            echo "Potential secrets detected in diff. Aborting."
+            exit 1
+          fi
+
+      - name: Create PR
+        if: steps.repair.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Ensure there are actually staged files before committing
+          if git diff --cached --quiet; then
+            echo "No allowed files staged. Exiting."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Auto-repair via self-healing pipeline"
+          git push origin "$BRANCH_NAME"
+
+          TITLE="[Self-Heal Reactive] CI fix"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create --title "$TITLE" \
+            --body "Automated self-healing PR. Please review the attached logs in GitHub Actions before merging." \
+            --label "automation,self-heal" \
+            --base main

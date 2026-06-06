@@ -1,0 +1,3 @@
+SELFHEAL_SCHEDULE: '0 0 * * 0'
+RATIONALE: 'Dormant repository, running weekly'
+LAST_UPDATED: '2026-06-06T00:54:18.270Z'
