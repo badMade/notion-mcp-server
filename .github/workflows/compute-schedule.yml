@@ -1,0 +1,89 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly on Sunday, to adjust the cadence if needed
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Git setup
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for duplicate schedule PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Duplicate open schedule PR found."
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "duplicate=false" >> $GITHUB_OUTPUT
+
+      - name: Compute New Schedule
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm ci || true
+          node scripts/compute_schedule.mjs
+
+      - name: Create Pull Request for Schedule Update
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet .github/self-heal-schedule.yml; then
+            echo "No schedule change required."
+            exit 0
+          fi
+
+          # Also update the actual cron in self-heal.yml based on the marker
+          NEW_CRON=$(cat .github/self-heal-schedule.yml | grep -oP '(?<=schedule: ").*(?=")')
+          sed -i "s|cron: \".*\" # AUTO-UPDATED|cron: \"$NEW_CRON\" # AUTO-UPDATED|g" .github/workflows/self-heal.yml
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: auto-update self-heal schedule"
+          git push -u origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR adjusting the self-heal schedule based on recent repository activity." \
+            --label "self-heal-schedule,automation" \
+            --base main
