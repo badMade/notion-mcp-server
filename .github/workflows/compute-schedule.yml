@@ -1,0 +1,82 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs every Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git User
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for Duplicate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for open schedule PRs
+          RECENT_PR=$(gh pr list --label "self-heal-schedule" --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open. Stopping to avoid duplicate PRs."
+            exit 0
+          fi
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        run: |
+          node scripts/compute_schedule.mjs
+
+      - name: Validate Changes
+        id: validate
+        run: |
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          if git diff --cached --quiet; then
+            echo "No schedule changes to commit. Stopping."
+            exit 0
+          fi
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        if: steps.validate.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git commit -m "Auto-update: Self-Heal cadence adjusted"
+          git push origin HEAD:$BRANCH_NAME
+
+          TITLE="[Self-Heal Schedule] Update cadence"
+
+          cat << 'PR_BODY' > pr_body.txt
+          Automated schedule update PR based on recent repository activity.
+
+          - **Trigger:** Schedule recomputation
+          - **Checklist:**
+            - [ ] Verify the computed schedule makes sense based on recent PR/commit velocity
+            - [ ] If you want to override, edit `.github/self-heal-schedule.yml` directly or close this PR
+          PR_BODY
+
+          gh pr create --title "$TITLE" --body-file pr_body.txt --head $BRANCH_NAME --base main --label "self-heal-schedule" --label "automation"
