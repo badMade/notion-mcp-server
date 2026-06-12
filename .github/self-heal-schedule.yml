@@ -1,0 +1,3 @@
+SELFHEAL_SCHEDULE: '0 0 * * 0'
+RATIONALE: 'Low activity (1 commits). Running weekly on Sunday at 0:00.'
+LAST_UPDATED: '2026-06-12T01:04:13.169Z'

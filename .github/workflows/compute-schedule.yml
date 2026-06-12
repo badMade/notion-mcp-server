@@ -1,0 +1,96 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 1,15 * *" # Runs 1st and 15th of the month
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >
+      (!startsWith(github.ref_name, 'selfheal-')) &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20.x'
+
+      - name: Install JS-YAML
+        run: npm install -D js-yaml
+
+      - name: Check for duplicate schedule PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || true)
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open. Exiting."
+            exit 0
+          fi
+
+      - name: Oscillation Guard
+        run: |
+          LAST_UPDATED=$(grep LAST_UPDATED .github/self-heal-schedule.yml | cut -d"'" -f2 | cut -d'"' -f2 || echo "")
+          if [ -n "$LAST_UPDATED" ]; then
+            DAYS_AGO=$(( ($(date +%s) - $(date -d "$LAST_UPDATED" +%s)) / 86400 ))
+            if [ "$DAYS_AGO" -lt 3 ]; then
+              echo "Schedule was updated less than 3 days ago. Skipping to prevent oscillation."
+              exit 0
+            fi
+          fi
+
+      - name: Compute New Schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Verify valid YAML output
+        run: node -e "require('js-yaml').load(require('fs').readFileSync('.github/self-heal-schedule.yml', 'utf8'))"
+
+      - name: Create PR if schedule changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet .github/self-heal-schedule.yml .github/workflows/self-heal.yml; then
+            echo "Schedule unchanged. No PR needed."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No allowed files staged. Exiting."
+            exit 0
+          fi
+
+          git commit -m "Auto-update self-heal cadence"
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-healing schedule based on recent repository telemetry. Review required before merging." \
+            --label "self-heal-schedule" \
+            --label "automation" \
+            --head $BRANCH_NAME \
+            --base main
