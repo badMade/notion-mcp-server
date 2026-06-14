@@ -1,0 +1,87 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Daily check to see if schedule needs update
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: github.repository == 'makenotion/notion-mcp-server'
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute new schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for differences
+        id: diff
+        run: |
+          if git status --porcelain | grep -q '^\s*[A-Z?]'; then
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+
+            # Use sed to update the workflow cron string since it's the simplest fallback if no JS tool edits yaml
+            # Reading the computed schedule from the metadata file
+            NEW_CRON=$(node -e "console.log(require('js-yaml').load(require('fs').readFileSync('.github/self-heal-schedule.yml', 'utf8')).schedule)")
+            sed -i "s/- cron: '.*' # AUTO-UPDATED/- cron: '$NEW_CRON' # AUTO-UPDATED/" .github/workflows/self-heal.yml
+
+            git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          else
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+          fi
+
+      - name: Check for existing self-heal schedule PRs
+        id: pr-check
+        if: env.HAS_CHANGES == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Existing schedule PR found. Exiting to avoid duplicates."
+            echo "CAN_PR=false" >> $GITHUB_ENV
+          else
+            echo "CAN_PR=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: env.HAS_CHANGES == 'true' && env.CAN_PR == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "chore: update self-heal cadence"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Auto-generated PR to update the self-healing schedule based on recent telemetry.
+
+            Check \`.github/self-heal-schedule.yml\` for the rationale." \
+            --label "self-heal-schedule" \
+            --label "automation"

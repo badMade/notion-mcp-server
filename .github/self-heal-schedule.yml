@@ -1,0 +1,4 @@
+schedule: '0 0 1 * *'
+tier: 'dormant'
+rationale: 'Computed based on 0 commits in the last 30 days.'
+lastUpdated: '2026-06-14T01:09:12.154Z'
