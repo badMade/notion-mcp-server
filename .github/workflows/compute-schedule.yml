@@ -1,0 +1,75 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly to evaluate if schedule needs to shift
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prevent Duplicate Schedule PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open. Skipping to avoid duplicates."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Run Compute Script
+        if: env.SKIP != 'true'
+        run: ./scripts/compute_schedule.mjs
+
+      - name: Stage Allowed Files
+        if: env.SKIP != 'true'
+        run: |
+          git add .github/self-heal-schedule.yml 2>/dev/null || true
+          git add .github/workflows/self-heal.yml 2>/dev/null || true
+
+      - name: Create PR if modified
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --cached --quiet; then
+            echo "Schedule unchanged. Nothing to commit."
+            exit 0
+          fi
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-update-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Automated update to self-heal schedule"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-heal schedule based on recent git history telemetry." \
+            --label "automation,self-heal-schedule" \
+            --head "$BRANCH_NAME" \
+            --base main
