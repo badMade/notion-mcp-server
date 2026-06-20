@@ -1,0 +1,5 @@
+schedule: '0 8 * * *'
+rationale: 'Low PR velocity (<10 commits/mo). Running once daily.'
+last_updated: '2026-06-20T00:52:38.519Z'
+
+# AUTO-UPDATED
