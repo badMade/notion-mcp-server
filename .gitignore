@@ -10,3 +10,6 @@ bin/
 .cursor
 
 .DS_Store
+.env
+venv/
+.litellm_costs.csv

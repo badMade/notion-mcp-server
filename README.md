@@ -325,3 +325,9 @@ Publish
 ```
 npm publish --access public
 ```
+
+## AI-Assisted Development (LiteLLM)
+```bash
+make setup-ai
+make test-ai
+```
