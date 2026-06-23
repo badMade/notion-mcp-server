@@ -1,0 +1,3 @@
+SCHEDULE: '0 0 * * 1'
+RATIONALE: 'Dormant repository. Scheduling once a week.'
+LAST_UPDATED: '2026-06-23T01:04:42.220Z'
