@@ -1,0 +1,66 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Runs weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Schedule Computation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Git Config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and Create PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet; then
+            echo "No schedule changes computed. Exiting cleanly."
+            exit 0
+          fi
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "chore(self-heal): update schedule cadence"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-healing schedule cadence based on telemetry." \
+            --label "self-heal-schedule" \
+            --label "automation"
