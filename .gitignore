@@ -10,3 +10,6 @@ bin/
 .cursor
 
 .DS_Store
+repair.log
+pre-check.log
+post-check.log

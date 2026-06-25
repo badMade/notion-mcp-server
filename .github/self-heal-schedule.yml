@@ -1,0 +1,4 @@
+cron: 0 16 * * 1
+tier: dormant
+rationale: Dormant PR velocity. Runs once weekly.
+last_updated: '2026-06-25T00:55:13.522Z'
