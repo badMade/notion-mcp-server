@@ -1,0 +1,100 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs daily to re-evaluate cadence
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Git Committer
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute New Schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs
+
+      - name: Update Workflow File
+        run: |
+          # The schedule is written to .github/self-heal-schedule.yml by the script.
+          # Now we parse it and update the actual GitHub Action workflow file using sed.
+          # We use single quotes or double quotes to handle parsing gracefully if needed,
+          # but our js-yaml outputs it pretty consistently.
+          NEW_CRON=$(grep "schedule:" .github/self-heal-schedule.yml | awk -F': ' '{print $2}' | tr -d '"' | tr -d "'")
+          if [ -n "$NEW_CRON" ]; then
+            echo "Updating workflow with cron: $NEW_CRON"
+            sed -i "s|cron: .* # AUTO-UPDATED|cron: '$NEW_CRON' # AUTO-UPDATED|g" .github/workflows/self-heal.yml
+          else
+            echo "Could not extract cron schedule."
+            exit 1
+          fi
+
+      - name: Ensure Allowed Files Only
+        run: |
+          git add -A
+          # Only schedule metadata and self-heal workflow should be modified
+          UNALLOWED_DIFF=$(git diff --cached --name-only | grep -vE "^(\.github/self-heal-schedule\.yml|\.github/workflows/self-heal\.yml)$" || true)
+          if [ ! -z "$UNALLOWED_DIFF" ]; then
+            echo "❌ Unallowed file modifications detected: $UNALLOWED_DIFF"
+            exit 1
+          fi
+
+      - name: Check for recent open schedule PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open -q ".[0].number" --json number || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open (PR #$RECENT_PR). Skipping to prevent thrashing."
+            echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --cached --quiet; then
+            echo "Schedule unchanged or oscillation guard prevented updates. No PR needed."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "Auto-update self-healing CI schedule"
+          git push origin $BRANCH_NAME
+
+          PR_BODY="This PR automatically updates the CI cadence based on recent PR velocity telemetry.\n\n"
+          PR_BODY+="The updated schedule and rationale can be found in \`.github/self-heal-schedule.yml\`.\n"
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "$PR_BODY" --label "self-heal-schedule" --label "automation" --head $BRANCH_NAME --base ${{ github.event.repository.default_branch }}
