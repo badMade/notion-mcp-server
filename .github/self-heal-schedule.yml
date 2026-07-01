@@ -1,0 +1,4 @@
+schedule: 25 1 * * *
+rationale: 'Computed from telemetry: velocity=standard (commits=0)'
+last_updated: 1782867206240
+override: false
