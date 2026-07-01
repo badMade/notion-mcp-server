@@ -1,0 +1,148 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    - cron: '25 1 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    # Fails closed: Only run scheduled jobs on default branch. For workflow_run, only run if CI failed.
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Stale PR Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close self-heal PRs older than 7 days
+          DATE=$(date -d "7 days ago" +%Y-%m-%d)
+          gh pr list --label self-heal --search "created:<$DATE" --state open --json number -q '.[].number' | xargs -I {} gh pr close {} -c "Auto-closing stale self-heal PR" || true
+
+      - name: Check for recent open selfheal PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A self-heal PR is already open. Skipping execution."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Pre-Healthcheck
+        if: env.SKIP != 'true'
+        continue-on-error: true
+        env:
+          HEALTHCHECK_LOG: pre-check.log
+        run: |
+          node scripts/healthcheck.mjs
+
+      - name: Execute Self-Heal Pipeline
+        if: env.SKIP != 'true'
+        env:
+          REPAIR_LOG: repair.log
+        run: |
+          node scripts/self_heal.mjs
+
+      - name: Gate - Check Allowed Files Only
+        if: env.SKIP != 'true'
+        run: |
+          git add -A
+          # Exclude allowed paths
+          FORBIDDEN=$(git diff --cached --name-only -- ':!src/' ':!tests/' ':!scripts/' ':!package*.json' ':!eslint.config.mjs')
+          if [ -n "$FORBIDDEN" ]; then
+            echo "Forbidden files modified: $FORBIDDEN"
+            exit 1
+          fi
+
+      - name: Gate - Entropy & Secrets Scan
+        if: env.SKIP != 'true'
+        run: |
+          # Use grep -iE, do not escape pipe, exclude lockfile
+          if git diff --cached -U0 -- ':!package-lock.json' | grep -iE 'apikey|api_key|token|secret|password'; then
+            echo "Potential secrets matched in diff. Aborting."
+            exit 1
+          fi
+
+      - name: Gate - Non-empty Diff
+        if: env.SKIP != 'true'
+        run: |
+          if git diff --cached --quiet; then
+            echo "No meaningful changes to commit."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Post-Healthcheck
+        if: env.SKIP != 'true'
+        env:
+          HEALTHCHECK_LOG: post-check.log
+        run: |
+          node scripts/healthcheck.mjs
+
+      - name: Create Pull Request
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b $BRANCH
+          git commit -m "Auto-repair CI drift"
+          git push -u origin $BRANCH
+
+          TITLE="[Self-Heal "
+          if [ "${{ github.event_name }}" = "schedule" ]; then TITLE+="Scheduled] Drift fixes"; fi
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then TITLE+="Reactive] CI fix"; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then TITLE+="Manual] Repair"; fi
+
+          BODY=$(cat <<EOF
+          This PR was generated automatically by the self-healing workflow.
+
+          **Trigger:** ${{ github.event_name }}
+          **Logs:** See Actions artifacts for pre-check.log, repair.log, and post-check.log.
+
+          Please review the changes carefully.
+          EOF
+          )
+
+          gh pr create --title "$TITLE" --body "$BODY" --label "self-heal,automation" --head $BRANCH --base main
+
+      - name: Upload Artifact Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+          retention-days: 7

@@ -1,0 +1,94 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Evaluates daily
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-schedule
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs
+
+      - name: Check for duplicate Schedule PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open. Skipping execution."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Gate - Check Allowed Files Only
+        if: env.SKIP != 'true'
+        run: |
+          git add -A
+          # Exclude allowed paths for schedule updates
+          FORBIDDEN=$(git diff --cached --name-only -- ':!.github/self-heal-schedule.yml' ':!.github/workflows/self-heal.yml')
+          if [ -n "$FORBIDDEN" ]; then
+            echo "Forbidden files modified: $FORBIDDEN"
+            exit 1
+          fi
+
+      - name: Gate - Non-empty Diff
+        if: env.SKIP != 'true'
+        run: |
+          if git diff --cached --quiet; then
+            echo "No meaningful changes to commit."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create Pull Request
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH
+          git commit -m "Update self-heal schedule cadence"
+          git push -u origin $BRANCH
+
+          BODY=$(cat <<EOF
+          This PR updates the self-healing schedule cadence based on recent repository telemetry.
+
+          **Trigger:** ${{ github.event_name }}
+          EOF
+          )
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "$BODY" --label "self-heal-schedule,automation" --head $BRANCH --base main
