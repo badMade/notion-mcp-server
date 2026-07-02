@@ -1,0 +1,149 @@
+name: Self-Heal Repair Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Git Committer
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Stale PR Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SEVEN_DAYS_AGO=$(date -d "7 days ago" +%Y-%m-%d)
+          gh pr list --label "self-heal" --state open --search "created:<$SEVEN_DAYS_AGO" --json number -q '.[].number' | while read pr_number; do
+            if [ ! -z "$pr_number" ]; then
+              echo "Closing stale PR #$pr_number"
+              gh pr close "$pr_number" --comment "Auto-closing stale self-heal PR."
+            fi
+          done
+
+      - name: Duplicate PR Check
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label "self-heal" --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Open self-heal PR already exists. Skipping repair."
+            echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Pre-Repair Healthcheck
+        if: env.SKIP != 'true'
+        run: |
+          npm ci
+          node scripts/healthcheck.mjs || true
+        env:
+          HEALTHCHECK_LOG: pre-check.log
+
+      - name: Run Self-Heal Pipeline
+        if: env.SKIP != 'true'
+        id: repair_step
+        run: node scripts/self_heal.mjs
+
+      - name: Stage Changes
+        if: env.SKIP != 'true' && steps.repair_step.outcome == 'success'
+        run: git add -A
+
+      - name: File Constraints Check
+        if: env.SKIP != 'true' && steps.repair_step.outcome == 'success'
+        run: |
+          # Entropy scan (basic secrets)
+          if git diff --cached -U0 -- ':!package-lock.json' | grep -iE '(?i)(password|secret|token|api[_-]?key)'; then
+            echo "❌ Potential secret or entropy detected in diff"
+            exit 1
+          fi
+
+          # Allowed files check
+          UNALLOWED=$(git diff --cached --name-only | grep -vE '^(src/|tests/|scripts/|package.*\.json|eslint\.config\.mjs|self-heal-schedule\.yml|\.github/workflows/self-heal\.yml)' || true)
+          if [ ! -z "$UNALLOWED" ]; then
+            echo "❌ Modified files outside allowed directories: $UNALLOWED"
+            exit 1
+          fi
+
+          # Forbidden files check
+          FORBIDDEN=$(git diff --cached --name-only | grep -E '^(\.env|secrets/|\.github/workflows/ci\.yml|src/.*/migrations/)' || true)
+          if [ ! -z "$FORBIDDEN" ]; then
+            echo "❌ Forbidden files modified: $FORBIDDEN"
+            exit 1
+          fi
+
+      - name: Create PR
+        if: env.SKIP != 'true' && steps.repair_step.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-repair-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "auto: self-heal repair"
+          git push origin $BRANCH_NAME
+
+          TITLE="[Self-Heal] Auto Repair Pipeline"
+          if [ "${GITHUB_EVENT_NAME}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${GITHUB_EVENT_NAME}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          elif [ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Automated drift and CI failure repair triggered by ${GITHUB_EVENT_NAME}. Review logs." \
+            --label "self-heal,automation" \
+            --base main
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            healthcheck.log
