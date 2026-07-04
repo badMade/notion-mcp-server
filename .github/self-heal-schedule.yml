@@ -1,0 +1,3 @@
+SELFHEAL_SCHEDULE: "0 0 * * 0"
+RATIONALE: "Initial default fallback schedule."
+LAST_UPDATED: "2024-01-01T00:00:00Z"
