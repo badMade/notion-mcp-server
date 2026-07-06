@@ -1,0 +1,120 @@
+name: Self-Healing Pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Close Stale Selfheal PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          THIRTY_DAYS_AGO=$(date -d "30 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          gh pr list --label self-heal --state open --json number,createdAt -q ".[] | select(.createdAt < \"$THIRTY_DAYS_AGO\") | .number" | while read pr_number; do
+            echo "Closing stale PR #$pr_number"
+            gh pr close $pr_number --comment "Closing stale self-heal PR."
+          done
+
+      - name: Run Self-Heal Script
+        id: heal
+        run: |
+          npm ci
+          node scripts/self_heal.mjs
+
+      - name: Configure Git
+        if: success()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for Entropy/Secrets
+        if: success()
+        run: |
+          git add -A
+          ! git diff --cached -U0 -- ':!package-lock.json' | grep -iE '(secret|password|token|key)'
+
+      - name: Verify Allowed Files
+        if: success()
+        run: |
+          git diff --cached --name-only | while read file; do
+            if [[ "$file" != src/* && "$file" != tests/* && "$file" != scripts/* && "$file" != package.json && "$file" != package-lock.json ]]; then
+              echo "Forbidden file changed: $file"
+              exit 1
+            fi
+            if [[ "$file" == .env* || "$file" == secrets/* || "$file" == .github/workflows/ci.yml ]]; then
+              echo "Forbidden file changed: $file"
+              exit 1
+            fi
+          done
+
+      - name: Check Duplicate PRs
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Open selfheal PR exists. Skipping."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: success() && env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+            TRIGGER_MSG="triggered by scheduled cadence"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+            TRIGGER_MSG="triggered by CI failure"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+            TRIGGER_MSG="triggered manually"
+          fi
+
+          if git diff --cached --quiet; then exit 0; fi
+
+          git commit -m "$TITLE"
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Automated self-healing PR $TRIGGER_MSG. Please review the changes." \
+            --label "automation,self-heal"
