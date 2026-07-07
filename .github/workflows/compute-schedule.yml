@@ -1,0 +1,66 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: "!startsWith(github.ref_name, 'selfheal-schedule-')"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Setup Git User
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Compute Schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check Diff & Commit
+        id: commit_check
+        run: |
+          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml || true
+          if git diff --cached --quiet; then
+            echo "No meaningful schedule changes. Exiting."
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+          else
+            git commit -m "Auto-update self-heal schedule based on telemetry"
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: env.HAS_CHANGES == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%Y%m%d%H%M%S)"
+          git checkout -b "$BRANCH_NAME"
+          git push -u origin "$BRANCH_NAME"
+
+          PR_TITLE="[Self-Heal Schedule] Update cadence"
+          PR_BODY="This PR auto-updates the schedule for the self-heal pipeline based on repository telemetry.\n\nPlease review."
+
+          gh pr create --title "$PR_TITLE" --body "$PR_BODY" --label "self-heal-schedule" --label "automation" --base main
