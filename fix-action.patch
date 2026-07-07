@@ -1,0 +1,11 @@
+--- .github/workflows/pr-review.yml
++++ .github/workflows/pr-review.yml
+@@ -15,7 +15,7 @@
+       - uses: actions/checkout@v4
+
+       - uses: badMade/agy-pr-review@main
+-        env:
+-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+         with:
+           github-token: ${{ secrets.GITHUB_TOKEN }}
++          antigravity_api_key: ${{ secrets.GEMINI_API_KEY }}
