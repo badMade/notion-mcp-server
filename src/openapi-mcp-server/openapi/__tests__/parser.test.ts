@@ -964,7 +964,7 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
             methods: [
               {
                 name: 'getAB',
-                description: 'Get an A-B object',
+                description: 'Notion | Get an A-B object',
                 // Error responses might not be listed here since none are defined.
                 // Just end the description with no Error Responses section.
                 inputSchema: {
@@ -1047,7 +1047,7 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
               },
               {
                 name: 'createAB',
-                description: 'Create an A-B object',
+                description: 'Notion | Create an A-B object',
                 inputSchema: {
                   type: 'object',
                   properties: {
@@ -1279,7 +1279,7 @@ describe('OpenAPIToMCPConverter - Additional Complex Tests', () => {
             methods: [
               {
                 name: 'getComposed',
-                description: 'Get a composed resource',
+                description: 'Notion | Get a composed resource',
                 inputSchema: {
                   type: 'object',
                   properties: {},

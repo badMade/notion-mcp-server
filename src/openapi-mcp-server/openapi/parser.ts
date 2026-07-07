@@ -27,11 +27,8 @@ export class OpenAPIToMCPConverter {
    * Resolve a $ref reference to its schema in the openApiSpec.
    * Returns the raw OpenAPI SchemaObject or null if not found.
    */
-  private internalResolveRef(ref: string, resolvedRefs: Set<string>): OpenAPIV3.SchemaObject | null {
+  private internalResolveRef(ref: string): OpenAPIV3.SchemaObject | null {
     if (!ref.startsWith('#/')) {
-      return null
-    }
-    if (resolvedRefs.has(ref)) {
       return null
     }
 
@@ -41,7 +38,6 @@ export class OpenAPIToMCPConverter {
       current = current[part]
       if (!current) return null
     }
-    resolvedRefs.add(ref)
     return current as OpenAPIV3.SchemaObject
   }
 
@@ -77,10 +73,22 @@ export class OpenAPIToMCPConverter {
         return this.schemaCache[ref]
       }
 
-      const resolved = this.internalResolveRef(ref, resolvedRefs)
+      // Handle self references / cycles
+      if (resolvedRefs.has(ref)) {
+        return {
+          $ref: ref.replace(/^#\/components\/schemas\//, '#/$defs/'),
+          ...('description' in schema && schema.description ? { description: schema.description as string } : {}),
+        }
+      }
+
+      // Add to resolved refs to prevent cycles
+      resolvedRefs.add(ref)
+
+      const resolved = this.internalResolveRef(ref)
       if (!resolved) {
-        // TODO: need extensive tests for this and we definitely need to handle the case of self references
         console.error(`Failed to resolve ref ${ref}`)
+        // Clean up from resolved refs if failed
+        resolvedRefs.delete(ref)
         return {
           $ref: ref.replace(/^#\/components\/schemas\//, '#/$defs/'),
           description: 'description' in schema ? ((schema.description as string) ?? '') : '',
@@ -88,6 +96,7 @@ export class OpenAPIToMCPConverter {
       } else {
         const converted = this.convertOpenApiSchemaToJsonSchema(resolved, resolvedRefs, resolveRefs)
         this.schemaCache[ref] = converted
+        resolvedRefs.delete(ref)
 
         return converted
       }
@@ -185,7 +194,7 @@ export class OpenAPIToMCPConverter {
         if (mcpMethod) {
           const uniqueName = this.ensureUniqueName(mcpMethod.name)
           mcpMethod.name = uniqueName
-          mcpMethod.description = this.getDescription(operation.summary || operation.description || '')
+          mcpMethod.description = this.getDescription(mcpMethod.description)
           tools[apiName]!.methods.push(mcpMethod)
           openApiLookup[apiName + '-' + uniqueName] = { ...operation, method, path }
           zip[apiName + '-' + uniqueName] = { openApi: { ...operation, method, path }, mcp: mcpMethod }
@@ -327,7 +336,7 @@ export class OpenAPIToMCPConverter {
     if (this.isParameterObject(param)) {
       return param
     } else {
-      const resolved = this.internalResolveRef(param.$ref, new Set())
+      const resolved = this.internalResolveRef(param.$ref)
       if (resolved && (resolved as OpenAPIV3.ParameterObject).name) {
         return resolved as OpenAPIV3.ParameterObject
       }
@@ -339,7 +348,7 @@ export class OpenAPIToMCPConverter {
     if (this.isRequestBodyObject(body)) {
       return body
     } else {
-      const resolved = this.internalResolveRef(body.$ref, new Set())
+      const resolved = this.internalResolveRef(body.$ref)
       if (resolved) {
         return resolved as OpenAPIV3.RequestBodyObject
       }
@@ -349,7 +358,7 @@ export class OpenAPIToMCPConverter {
 
   private resolveResponse(response: OpenAPIV3.ResponseObject | OpenAPIV3.ReferenceObject): OpenAPIV3.ResponseObject | null {
     if ('$ref' in response) {
-      const resolved = this.internalResolveRef(response.$ref, new Set())
+      const resolved = this.internalResolveRef(response.$ref)
       if (resolved) {
         return resolved as OpenAPIV3.ResponseObject
       } else {
