@@ -16,6 +16,5 @@ jobs:
       
       - uses: badMade/agy-pr-review@main
         with:
+          api-key: ${{ secrets.GEMINI_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
