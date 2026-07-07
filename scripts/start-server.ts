@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
-import { randomUUID, randomBytes } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import express from 'express'
 
 import { initProxy, ValidationError } from '../src/init-server'
@@ -77,10 +77,9 @@ Examples:
     app.use(express.json())
 
     // Generate or use provided auth token (from CLI arg or env var)
-    const authToken = options.authToken || process.env.AUTH_TOKEN || randomBytes(32).toString('hex')
-    if (!options.authToken && !process.env.AUTH_TOKEN) {
-      console.log(`Generated auth token: ${authToken}`)
-      console.log(`Use this token in the Authorization header: Bearer ${authToken}`)
+    const authToken = options.authToken || process.env.AUTH_TOKEN
+    if (!authToken) {
+      throw new Error('Authentication token is required for HTTP transport. Please provide a token using the --auth-token argument or AUTH_TOKEN environment variable.')
     }
 
     // Authorization middleware
