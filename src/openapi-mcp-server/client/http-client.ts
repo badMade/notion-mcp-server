@@ -14,6 +14,7 @@ export type HttpClientConfig = {
 export type HttpClientResponse<T = any> = {
   data: T
   status: number
+  statusText: string
   headers: Headers
 }
 
@@ -173,6 +174,7 @@ export class HttpClient {
       return {
         data: response.data,
         status: response.status,
+        statusText: response.statusText,
         headers: responseHeaders,
       }
     } catch (error: any) {

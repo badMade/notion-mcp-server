@@ -93,7 +93,10 @@ export class MCPProxy {
           content: [
             {
               type: 'text', // currently this is the only type that seems to be used by mcp server
-              text: JSON.stringify(response.data), // TODO: pass through the http status code text?
+              text: JSON.stringify({
+                _meta: { status: response.status, statusText: response.statusText },
+                ...(typeof response.data === 'object' && response.data !== null ? response.data : { data: response.data })
+              }), // TODO: pass through the http status code text?
             },
           ],
         }
@@ -103,12 +106,14 @@ export class MCPProxy {
           console.error('HttpClientError encountered, returning structured error', error)
           const data = error.data?.response?.data ?? error.data ?? {}
           return {
+            isError: true,
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
-                  status: 'error', // TODO: get this from http status code?
-                  ...(typeof data === 'object' ? data : { data: data }),
+                  status: error.status, // TODO: get this from http status code?
+                  statusText: error.message.replace(/^\d+ /, ''),
+                  ...(typeof data === 'object' && data !== null ? data : { data: data }),
                 }),
               },
             ],

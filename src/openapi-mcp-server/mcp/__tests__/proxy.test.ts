@@ -80,6 +80,7 @@ describe('MCPProxy', () => {
       const mockResponse = {
         data: { message: 'success' },
         status: 200,
+        statusText: 'OK',
         headers: new Headers({
           'content-type': 'application/json',
         }),
@@ -111,7 +112,10 @@ describe('MCPProxy', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ message: 'success' }),
+            text: JSON.stringify({
+              _meta: { status: 200, statusText: 'OK' },
+              message: 'success'
+            }),
           },
         ],
       })
@@ -137,6 +141,7 @@ describe('MCPProxy', () => {
       const mockResponse = {
         data: { message: 'success' },
         status: 200,
+        statusText: 'OK',
         headers: new Headers({
           'content-type': 'application/json'
         })
@@ -170,7 +175,10 @@ describe('MCPProxy', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ message: 'success' })
+            text: JSON.stringify({
+              _meta: { status: 200, statusText: 'OK' },
+              message: 'success'
+            })
           }
         ]
       })
