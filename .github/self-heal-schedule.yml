@@ -1,0 +1,5 @@
+cron: '0 0 * * *'
+tier: active
+commit_count_30d: 0
+rationale: Initial bootstrap schedule (Daily).
+last_updated: '2023-10-27T00:00:00.000Z'
