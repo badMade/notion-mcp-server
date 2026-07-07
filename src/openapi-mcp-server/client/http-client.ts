@@ -21,7 +21,7 @@ export class HttpClientError extends Error {
   constructor(
     message: string,
     public status: number,
-    public data: any,
+    public data: unknown,
     public headers?: Headers,
   ) {
     super(`${status} ${message}`)

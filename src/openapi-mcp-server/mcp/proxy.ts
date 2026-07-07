@@ -101,7 +101,13 @@ export class MCPProxy {
         console.error('Error in tool call', error)
         if (error instanceof HttpClientError) {
           console.error('HttpClientError encountered, returning structured error', error)
-          const data = error.data?.response?.data ?? error.data ?? {}
+
+          const isObject = (val: unknown): val is Record<string, unknown> => typeof val === 'object' && val !== null;
+          const data =
+            isObject(error.data) && isObject(error.data.response) && error.data.response.data !== undefined
+              ? error.data.response.data
+              : error.data ?? {}
+
           return {
             content: [
               {
