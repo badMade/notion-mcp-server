@@ -17,3 +17,4 @@ jobs:
       - uses: badMade/agy-pr-review@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          api-key: ${{ secrets.ANTIGRAVITY_API_KEY }}
