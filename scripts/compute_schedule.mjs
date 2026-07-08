@@ -94,8 +94,8 @@ function computeSchedule() {
     const h = quietestHour;
 
     const schedules = {
-      'high': `0 ${h}, ${(h+4)%24}, ${(h+8)%24}, ${(h+12)%24}, ${(h+16)%24}, ${(h+20)%24} * * *`,
-      'active': `0 ${h}, ${(h+8)%24}, ${(h+16)%24} * * *`,
+      'high': `0 ${h},${(h+4)%24},${(h+8)%24},${(h+12)%24},${(h+16)%24},${(h+20)%24} * * *`,
+      'active': `0 ${h},${(h+8)%24},${(h+16)%24} * * *`,
       'standard': `0 ${h} * * *`,
       'low-churn': `0 ${h} * * 1,4`,
       'dormant': `0 ${h} * * 1`
@@ -131,7 +131,7 @@ function updateScheduleFiles(newSchedule, tier) {
       if (existing && existing.last_updated) {
         const lastUpdatedDate = new Date(existing.last_updated);
         const hoursSinceUpdate = (new Date() - lastUpdatedDate) / (1000 * 60 * 60);
-        if (hoursSinceUpdate < 24 && existing.schedule === newSchedule) {
+        if (existing.schedule === newSchedule) {
           console.log("Schedule updated recently and unchanged. Skipping.");
           return false;
         }

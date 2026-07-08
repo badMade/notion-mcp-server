@@ -62,6 +62,8 @@ jobs:
           fi
 
           BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH_NAME"
           git commit -a -m "Update self-heal schedule based on telemetry"
           git push origin "$BRANCH_NAME"

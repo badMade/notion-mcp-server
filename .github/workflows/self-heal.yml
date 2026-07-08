@@ -120,6 +120,8 @@ jobs:
           fi
 
           BRANCH_NAME="selfheal-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH_NAME"
           git commit -m "Auto-repair via self-heal pipeline"
           git push origin "$BRANCH_NAME"
