@@ -1,0 +1,3 @@
+schedule: 0 2 * * 1
+rationale: 'Computed based on telemetry (tier: dormant)'
+last_updated: '2026-07-08T01:03:22.751Z'

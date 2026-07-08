@@ -1,0 +1,134 @@
+name: Self-Heal Automation
+
+on:
+  schedule:
+    - cron: '0 2 * * 1' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  self_heal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'schedule' || github.ref_name == github.event.repository.default_branch)
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check for Duplicate PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PRS=$(gh pr list --label self-heal --state open --json createdAt -q 'length' || echo "0")
+          if [ "$RECENT_PRS" -gt "0" ]; then
+            echo "SKIP=true" >> $GITHUB_ENV
+            echo "Found open self-heal PRs, skipping..."
+          fi
+
+      - name: Run Self-Heal Pipeline
+        id: repair
+        if: env.SKIP != 'true'
+        run: |
+          chmod +x scripts/healthcheck.mjs
+          chmod +x scripts/self_heal.mjs
+          ./scripts/self_heal.mjs
+
+      - name: Check Security / Entropy
+        id: security_check
+        if: env.SKIP != 'true'
+        run: |
+          # Close stale PRs
+          gh pr list --label self-heal --state open --json number,createdAt -q '.[] | select((now - (.createdAt | fromdate)) > 86400) | .number' | xargs -I {} gh pr close {} --comment "Closing stale self-heal PR" || true
+
+          # Stage all files first to make them available for diff --cached
+          git add -A
+
+          # Check path changes constraint
+          if git diff --cached --name-only | grep -qE "^\.github/workflows/ci\.yml$|^\.env$|^secrets/|migrations/"; then
+            echo "Forbidden file changes detected. Aborting."
+            git reset --hard
+            exit 1
+          fi
+
+          if git diff --cached --name-only | grep -qEv "^(src/|tests/|__tests__/|package\.json|package-lock\.json|scripts/|eslint\.config\.mjs|SELF_HEAL_SETUP\.md|\.github/self-heal-schedule\.yml)"; then
+            echo "Changes outside allowed directories detected. Aborting."
+            git diff --cached --name-only | grep -Ev "^(src/|tests/|__tests__/|package\.json|package-lock\.json|scripts/|eslint\.config\.mjs|SELF_HEAL_SETUP\.md|\.github/self-heal-schedule\.yml)"
+            git reset --hard
+            exit 1
+          fi
+
+          ! git diff --cached -U0 -- ':!package-lock.json' | grep -iE '(secret|api-key|auth-token|password|credential)'
+          echo "Security check passed."
+
+      - name: Generate Drift Summary
+        id: drift
+        if: env.SKIP != 'true' && steps.repair.outcome == 'success'
+        run: |
+          git diff --cached --stat > drift_summary.txt
+          echo "DRIFT_SUMMARY<<EOF" >> $GITHUB_ENV
+          cat drift_summary.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Upload Artifacts
+        if: env.SKIP != 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-logs-${{ github.run_id }}
+          path: drift_summary.txt
+          retention-days: 7
+
+      - name: Create Pull Request
+        if: env.SKIP != 'true' && steps.repair.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git status --porcelain
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No diff found. Skipping PR creation."
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            PR_TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            PR_TITLE="[Self-Heal Reactive] CI fix"
+          else
+            PR_TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Auto-repair via self-heal pipeline"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create             --title "$PR_TITLE"             --body "Automated self-healing pipeline triggered by ${{ github.event_name }}. Please review carefully before merging.
+
+### Drift Summary
+\`\`\`
+${{ env.DRIFT_SUMMARY }}
+\`\`\`
+
+[View Artifact Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"             --label "automation,self-heal"             --head "$BRANCH_NAME"             --base main
