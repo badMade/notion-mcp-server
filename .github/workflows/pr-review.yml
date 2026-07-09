@@ -17,7 +17,5 @@ jobs:
       - uses: badMade/agy-pr-review@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          api-key: ${{ secrets.ANTIGRAVITY_API_KEY || secrets.GEMINI_API_KEY }}
-        env:
-          ANTIGRAVITY_API_KEY: ${{ secrets.ANTIGRAVITY_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          api-key: ${{ secrets.ANTIGRAVITY_API_KEY }}
+          api_key: ${{ secrets.ANTIGRAVITY_API_KEY }}
