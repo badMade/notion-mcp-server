@@ -1,0 +1,87 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check for duplicate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json createdAt -q 'length' || echo "0")
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "SKIP=true" >> $GITHUB_ENV
+            echo "An open schedule update PR already exists. Skipping."
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Checkout code
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: Setup Node.js
+        if: env.SKIP != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install JS-YAML locally for script
+        if: env.SKIP != 'true'
+        run: npm ci
+
+      - name: Compute new schedule
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for Changes
+        if: env.SKIP != 'true'
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Pull Request
+        if: env.SKIP != 'true' && steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH
+          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
+          git commit -m "Auto-update self-heal schedule based on telemetry"
+          git push origin $BRANCH
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-healing pipeline schedule based on repository telemetry.
+Drift Summary: Schedule updated based on recent activity.
+Logs: Review the workflow run artifacts.
+
+Generated for Claude Code / Jules task." \
+            --label "automation,self-heal-schedule" \
+            --base main
