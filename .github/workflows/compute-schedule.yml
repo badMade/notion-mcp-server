@@ -1,0 +1,80 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Weekly run
+  workflow_dispatch:
+
+concurrency:
+  group: computeschedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: github.ref_name == 'main'
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for open Schedule PRs
+        id: check-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "An open schedule update PR already exists. Skipping compute."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Compute new schedule
+        if: env.SKIP != 'true'
+        run: node scripts/compute_schedule.mjs
+
+      - name: Create Pull Request if changed
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git status --porcelain
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "Schedule unchanged. No PR needed."
+            exit 0
+          fi
+
+          git reset
+          for path in .github/workflows/self-heal.yml .github/self-heal-schedule.yml; do
+            git add "$path" 2>/dev/null || true
+          done
+
+          if git diff --cached --quiet; then
+            echo "No relevant schedule files modified."
+            exit 0
+          fi
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git commit -m "Auto-update self-heal schedule based on telemetry"
+          git branch -m $BRANCH_NAME
+          git push origin $BRANCH_NAME
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated PR to adjust the self-healing pipeline schedule based on recent PR/Commit velocity." --label self-heal-schedule --head $BRANCH_NAME --base main
