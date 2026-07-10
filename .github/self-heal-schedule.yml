@@ -1,0 +1,3 @@
+LAST_UPDATED: "2024-01-01T00:00:00.000Z"
+SCHEDULE: "0 0 * * *" # AUTO-UPDATED
+RATIONALE: "Initial default daily schedule. Will be updated by compute_schedule.mjs."
