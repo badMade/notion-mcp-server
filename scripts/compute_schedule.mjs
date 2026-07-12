@@ -34,8 +34,31 @@ function getCommitFrequencyByHour() {
   }
 }
 
+function getPRVelocityTier() {
+  try {
+    // Get merged PRs in last 14 days
+    const mergedOutput = execSync('gh pr list --state merged --json mergedAt -L 100', { cwd: rootDir, stdio: 'pipe' }).toString();
+    const mergedPRs = JSON.parse(mergedOutput);
+
+    const twoWeeksAgo = new Date();
+    twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+
+    const recentPRs = mergedPRs.filter(pr => new Date(pr.mergedAt) > twoWeeksAgo).length;
+
+    if (recentPRs > 20) return 'high';
+    if (recentPRs > 10) return 'active';
+    if (recentPRs > 5) return 'standard';
+    if (recentPRs > 1) return 'low-churn';
+    return 'dormant';
+  } catch (error) {
+    console.warn("Could not determine PR velocity, defaulting to 'standard' tier.");
+    return 'standard';
+  }
+}
+
 function computeOptimalSchedule() {
   const commitHours = getCommitFrequencyByHour();
+  const velocityTier = getPRVelocityTier();
 
   // Find the quietest 4-hour window
   let minCommits = Infinity;
@@ -55,13 +78,41 @@ function computeOptimalSchedule() {
   // Schedule right before the quietest window
   const scheduleHour = (quietestStartHour > 0) ? quietestStartHour - 1 : 23;
 
-  // Base tier: standard (runs during active periods - we just use a daily cron for simplicity based on the quietest hour)
-  const cronExpression = `0 ${scheduleHour} * * *`;
+  let cronExpression;
+  let rationale;
 
-  return {
-    cron: cronExpression,
-    rationale: `Scheduled daily at ${scheduleHour}:00 UTC, immediately preceding the quietest 4-hour historical commit window (starting at ${quietestStartHour}:00 UTC).`
-  };
+  switch (velocityTier) {
+    case 'high':
+      // High velocity: run every 6 hours, starting relative to quiet period
+      cronExpression = `0 ${(scheduleHour) % 24},${(scheduleHour+6) % 24},${(scheduleHour+12) % 24},${(scheduleHour+18) % 24} * * *`;
+      rationale = `High PR velocity detected. Scheduled 4 times daily (starting immediately preceding quietest historical window at ${quietestStartHour}:00 UTC).`;
+      break;
+    case 'active':
+      // Active velocity: run every 12 hours
+      cronExpression = `0 ${(scheduleHour) % 24},${(scheduleHour+12) % 24} * * *`;
+      rationale = `Active PR velocity detected. Scheduled twice daily (starting immediately preceding quietest historical window at ${quietestStartHour}:00 UTC).`;
+      break;
+    case 'standard':
+      // Standard velocity: run daily
+      cronExpression = `0 ${scheduleHour} * * *`;
+      rationale = `Standard PR velocity detected. Scheduled daily at ${scheduleHour}:00 UTC (immediately preceding quietest historical window at ${quietestStartHour}:00 UTC).`;
+      break;
+    case 'low-churn':
+      // Low churn: run twice a week (Mon, Thu)
+      cronExpression = `0 ${scheduleHour} * * 1,4`;
+      rationale = `Low PR churn detected. Scheduled twice weekly (Mon/Thu) at ${scheduleHour}:00 UTC.`;
+      break;
+    case 'dormant':
+      // Dormant: run weekly (Sunday)
+      cronExpression = `0 ${scheduleHour} * * 0`;
+      rationale = `Dormant PR velocity detected. Scheduled weekly on Sundays at ${scheduleHour}:00 UTC.`;
+      break;
+    default:
+      cronExpression = `0 ${scheduleHour} * * *`;
+      rationale = `Default scheduling (daily) at ${scheduleHour}:00 UTC.`;
+  }
+
+  return { cron: cronExpression, rationale };
 }
 
 function main() {
