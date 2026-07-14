@@ -1,0 +1,146 @@
+name: Self-Heal Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # AUTO-UPDATED
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    # Only run scheduled triggers on the default branch
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'schedule' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cleanup Stale PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Auto-close stale selfheal PRs older than 7 days
+          if command -v gh >/dev/null 2>&1; then
+            SEVEN_DAYS_AGO=$(date -d "7 days ago" +%s 2>/dev/null || date -v-7d +%s 2>/dev/null)
+            STALE_PRS=$(gh pr list --label self-heal --state open --json number,createdAt -q '.[] | select((.createdAt | fromdateiso8601) < '"$SEVEN_DAYS_AGO"') | .number' 2>/dev/null || echo "")
+            for pr in $STALE_PRS; do
+               gh pr close $pr --comment "Auto-closing stale self-heal PR" || true
+            done
+          fi
+        continue-on-error: true
+
+      - name: Prevent duplicate PRs
+        id: check_duplicate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number -q '.[].number')
+          if [ ! -z "$OPEN_PRS" ]; then
+            echo "duplicate_exists=true" >> $GITHUB_OUTPUT
+            echo "An open self-heal PR already exists. Exiting."
+          else
+            echo "duplicate_exists=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+
+      - name: Pre-Repair Healthcheck
+        id: pre_healthcheck
+        if: steps.check_duplicate.outputs.duplicate_exists != 'true'
+        run: |
+          chmod +x scripts/healthcheck.mjs scripts/self_heal.mjs
+          ./scripts/healthcheck.mjs
+        continue-on-error: true
+
+      - name: Run Self-Heal Pipeline
+        if: steps.check_duplicate.outputs.duplicate_exists != 'true'
+        id: self_heal
+        run: |
+          ./scripts/self_heal.mjs
+        continue-on-error: true
+
+      - name: Ensure Code Changes
+        id: git_status
+        if: steps.check_duplicate.outputs.duplicate_exists != 'true' && steps.self_heal.outcome == 'success'
+        run: |
+          git add -A
+          if [ -z "$(git status --porcelain)" ]; then
+             echo "has_diff=false" >> $GITHUB_OUTPUT
+             exit 0
+          fi
+
+          # file_changes_NOT_in guard
+          FORBIDDEN_CHANGES=$(git diff --cached --name-only | grep -E '(\.github/workflows/ci\.yml|\.env|secrets/|src/.*/migrations/)' || true)
+          if [ -n "$FORBIDDEN_CHANGES" ]; then
+             echo "Error: Repair modified forbidden files: $FORBIDDEN_CHANGES"
+             exit 1
+          fi
+
+          # file_changes_only_in guard
+          ALLOWED_CHANGES=$(git diff --cached --name-only | grep -vE '(src/|tests/|__tests__/|requirements.*\.txt|package\.json|package-lock\.json|go\.sum|go\.mod|eslint\.config\.mjs|scripts/.*\.mjs|\.prettierrc)' || true)
+          if [ -n "$ALLOWED_CHANGES" ]; then
+             echo "Error: Repair modified unallowed files: $ALLOWED_CHANGES"
+             exit 1
+          fi
+
+          # Meaningful diff check
+          git diff --cached -w > /tmp/non_ws_diff
+          if [ ! -s /tmp/non_ws_diff ] && [ "${{ steps.pre_healthcheck.outcome }}" == "success" ]; then
+             echo "Meaningful diff check failed: Only whitespace changes and healthcheck was already passing."
+             exit 1
+          fi
+
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+
+      - name: Scan for Secrets
+        if: steps.git_status.outputs.has_diff == 'true'
+        run: |
+          ! git diff --cached | grep -iE '(secret|api_key|token|password)'
+
+      - name: Verify Healthcheck Passes
+        id: post_healthcheck
+        if: steps.git_status.outputs.has_diff == 'true'
+        run: |
+          ./scripts/healthcheck.mjs
+
+      - name: Create PR
+        if: steps.post_healthcheck.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Auto-repair drift/failure"
+          git push origin "$BRANCH_NAME"
+
+          TITLE="[Self-Heal Manual] Repair"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          fi
+
+          gh pr create --title "$TITLE" --body "Self-healing repair triggered by ${GITHUB_EVENT_NAME}. Please review changes." --label "automation" --label "self-heal"

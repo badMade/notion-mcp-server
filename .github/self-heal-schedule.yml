@@ -1,0 +1,3 @@
+schedule: '0 0 * * *' # AUTO-UPDATED
+rationale: Initial bootstrap schedule (daily). Will be dynamically adjusted by compute_schedule logic.
+last_updated: '2023-10-01T00:00:00Z'

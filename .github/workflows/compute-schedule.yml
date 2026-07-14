@@ -1,0 +1,79 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly base, script logic decides actual rate
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/compute_schedule.mjs
+          ./scripts/compute_schedule.mjs
+
+      - name: Check for differences
+        id: git_status
+        run: |
+          git add -A
+          if [ -n "$(git status --porcelain)" ]; then
+             echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+             echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Workflow Cron
+        if: steps.git_status.outputs.has_diff == 'true'
+        run: |
+          CRON_EXPR=$(node -e "const yaml = require('js-yaml'); const fs = require('fs'); console.log(yaml.load(fs.readFileSync('.github/self-heal-schedule.yml', 'utf8')).schedule);")
+          # Validate cron expression briefly
+          if [ -z "$CRON_EXPR" ]; then
+             echo "Invalid cron expression"
+             exit 1
+          fi
+          sed -i "s|cron:.*# AUTO-UPDATED|cron: '${CRON_EXPR}' # AUTO-UPDATED|" .github/workflows/self-heal.yml
+
+          # Validate YAML
+          node -e "require('js-yaml').load(require('fs').readFileSync('.github/workflows/self-heal.yml', 'utf8'))"
+          git add .github/workflows/self-heal.yml
+
+      - name: Create PR
+        if: steps.git_status.outputs.has_diff == 'true'
+        env:
+          # A Personal Access Token with workflow scope is needed to modify other workflow files
+          GITHUB_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="schedule-update-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Auto-update self-heal schedule"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Adaptive schedule update based on recent repository telemetry." --label "automation" --label "self-heal-schedule"
