@@ -1,0 +1,3 @@
+current_schedule: 0 3 * * *
+rationale: Computed based on dormant PR velocity
+last_updated: '2026-07-16T00:00:00.000Z'

@@ -1,0 +1,19 @@
+Automated repair pipeline setup.
+
+This PR introduces an automated self-healing pipeline that detects CI failures and code drift, and attempts a series of idempotent repairs (e.g. `npm ci`, `eslint --fix`, `vitest run -u`).
+
+### Triggers
+1. **Scheduled:** Runs periodically (initially `0 3 * * *` based on dormant PR velocity).
+2. **CI Failure:** Reactively runs if the main CI workflow fails.
+3. **Manual:** Can be triggered via workflow dispatch.
+
+### Schedule Rationale
+The initial schedule is `0 3 * * *` because the repository is dormant (few recent PRs/commits). The `compute-schedule.yml` workflow will periodically re-evaluate git history (PR velocity and self-healing success rates) and update this schedule automatically.
+
+### Overrides
+You can manually edit `.github/self-heal-schedule.yml` and `.github/workflows/self-heal.yml` to set a custom schedule. The `last_updated` field prevents immediate oscillation.
+
+### Reviewer Checklist
+- [ ] Confirm no recursive deletions occurred.
+- [ ] Ensure changes don't manipulate test logic (only snapshot updates).
+- [ ] Verify no secrets were committed.
