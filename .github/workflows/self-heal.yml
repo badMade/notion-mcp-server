@@ -1,0 +1,120 @@
+name: Self-Heal Pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'schedule' || github.ref_name == github.event.repository.default_branch)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Duplicate PR Check & Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close stale PRs older than 7 days
+          gh pr list --label self-heal --state open --json number,createdAt --jq '.[] | select(.createdAt < (now - 604800 | todate)) | .number' | xargs -I {} gh pr close {} || true
+
+          # Check for open self-heal PRs in recent window (e.g. within last 24h)
+          OPEN_RECENT_PRS=$(gh pr list --label self-heal --state open --json createdAt --jq '.[] | select(.createdAt > (now - 86400 | todate))')
+          if [ -n "$OPEN_RECENT_PRS" ]; then
+            echo "A recent self-heal PR is already open. Skipping execution to avoid duplicate PR spam."
+            exit 0
+          fi
+
+      - name: Pre-Healthcheck
+        id: pre
+        run: |
+          ./scripts/healthcheck.mjs
+        continue-on-error: true
+
+      - name: Run Self-Heal
+        id: heal
+        run: |
+          ./scripts/self_heal.mjs
+        continue-on-error: true
+
+      - name: Check Diff Boundaries
+        id: boundary
+        run: |
+          git add -A
+          # Must have diff
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes made."
+            exit 1
+          fi
+
+          # File denylist: .github/workflows/ci.yml, .env, secrets/
+          ! git diff --cached --name-only | grep -E '(\.github/workflows/ci\.yml|\.env|^secrets/|src/.*/migrations/)'
+
+          # Secret scanning: Use inverted grep to fail if secrets found
+          ! git diff --cached | grep -iE '(secret|token=|password)'
+
+          echo "Boundaries OK."
+
+      - name: Post-Healthcheck
+        if: steps.heal.outcome == 'success' && steps.boundary.outcome == 'success'
+        id: post
+        run: |
+          ./scripts/healthcheck.mjs
+
+      - name: Create PR
+        if: steps.post.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b $BRANCH_NAME
+
+          TITLE_PREFIX="[Self-Heal Scheduled]"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE_PREFIX="[Self-Heal Reactive]"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TITLE_PREFIX="[Self-Heal Manual]"
+          fi
+
+          git commit -m "Auto-repaired drift/CI failures"
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "$TITLE_PREFIX Drift fixes" \
+            --body "Automated self-healing PR. Please review before merging. See SELF_HEAL_SETUP.md for details." \
+            --label "automation" \
+            --label "self-heal"
