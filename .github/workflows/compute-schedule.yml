@@ -1,0 +1,90 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 4 * * 1' # Weekly on Monday at 4 AM
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs
+
+      - name: Verify Git Diff
+        id: diff_check
+        run: |
+          git add -A
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes found. Exiting."
+            exit 0
+          fi
+
+          # Verify it's only modifying the allowed files
+          if git diff --cached --name-only | grep -vqE '^.github/workflows/self-heal.yml|^.github/self-heal-schedule.yml'; then
+             echo "Error: Modifying files other than schedule files. Aborting."
+             exit 1
+          fi
+
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+
+      - name: Check for duplicate PR
+        id: duplicate_check
+        if: steps.diff_check.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PR=$(gh pr list --label self-heal-schedule --state open --json number | jq '. | length')
+          if [ "$OPEN_PR" -gt 0 ]; then
+             echo "Duplicate open schedule PR found. Aborting PR creation."
+             echo "duplicate=true" >> $GITHUB_OUTPUT
+          else
+             echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR for Schedule Update
+        if: steps.diff_check.outputs.has_diff == 'true' && steps.duplicate_check.outputs.duplicate == 'false'
+        env:
+          # Use PAT_WITH_WORKFLOW_SCOPE to allow pushing updates to workflows
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          # Configure Git Identity
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git commit -m "Update self-heal schedule based on telemetry"
+          git checkout -b $BRANCH_NAME
+          git push -u origin $BRANCH_NAME
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" \
+                       --body "Automated PR to update the self-heal schedule based on recent repository telemetry." \
+                       --label "automation,self-heal-schedule" \
+                       --base main \
+                       --head $BRANCH_NAME

@@ -10,3 +10,7 @@ bin/
 .cursor
 
 .DS_Store
+
+# Self-Heal Artifacts
+open_prs.json
+*.log
