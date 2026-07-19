@@ -152,8 +152,20 @@ jobs:
           git checkout -b $BRANCH_NAME
           git push -u origin $BRANCH_NAME
 
+          CURRENT_SCHEDULE=$(grep -A 2 "schedule:" .github/self-heal-schedule.yml || echo "Unknown")
           PR_BODY="Automated repair pipeline generated this PR. Please review.
-          Trigger reason: ${{ github.event_name }}
+
+          **Trigger reason:** ${{ github.event_name }}
+          **Current Schedule:**
+          \`\`\`yaml
+          ${CURRENT_SCHEDULE}
+          \`\`\`
+
+          **Drift Summary:**
+          \`\`\`
+          $(git diff --stat)
+          \`\`\`
+
           Artifact logs are available on the GitHub Action run.
           Check SELF_HEAL_SETUP.md for review checklist."
 

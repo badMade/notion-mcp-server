@@ -43,25 +43,56 @@ async function computeSchedule() {
      prs = JSON.parse(prLogs);
   } catch (e) {}
 
+
+  // Compute optimal quiet hour based on commit history
+  const commitLogs = runCommand("git log --format=%aI --since='30 days ago'") || "";
+  let quietHour = 3; // default
+  if (commitLogs) {
+    const hours = commitLogs.split('\n').filter(Boolean).map(log => {
+      try {
+        return new Date(log).getUTCHours();
+      } catch (e) {
+        return null;
+      }
+    }).filter(h => h !== null);
+
+    if (hours.length > 0) {
+      const hourCounts = new Array(24).fill(0);
+      hours.forEach(h => hourCounts[h]++);
+
+      // Find the hour with the least commits (or longest contiguous quiet window)
+      // For simplicity, just finding the absolute minimum hour
+      let minCount = Infinity;
+      let minHour = 3;
+      for(let i=0; i<24; i++) {
+         if (hourCounts[i] < minCount) {
+             minCount = hourCounts[i];
+             minHour = i;
+         }
+      }
+      quietHour = minHour;
+    }
+  }
+
   let cadenceTier = "infrequent";
-  let scheduleExpr = "0 3 * * 0"; // Default: Weekly on Sunday at 3 AM
-  let rationale = "Default low-activity fallback";
+  let scheduleExpr = `0 ${quietHour} * * 0`; // Default: Weekly on Sunday at quiet hour
+  let rationale = `Default low-activity fallback, running at quietest hour (${quietHour}:00 UTC)`;
 
   if (prs.length > 20) {
      cadenceTier = "high";
-     scheduleExpr = "0 */12 * * *"; // Every 12 hours
-     rationale = "High PR velocity detected (>20 recently merged PRs)";
+     // Note: avoiding 12 hour to respect quietest time, running offset instead.
+     scheduleExpr = `0 ${quietHour},${(quietHour+12)%24} * * *`; // Twice a day
+     rationale = `High PR velocity detected (>20 recently merged PRs), running at ${quietHour}:00 and ${(quietHour+12)%24}:00 UTC`;
   } else if (prs.length > 10) {
      cadenceTier = "active";
-     scheduleExpr = "0 3 * * 1-5"; // Weekdays at 3 AM
-     rationale = "Active PR velocity detected (10-20 recently merged PRs)";
+     scheduleExpr = `0 ${quietHour} * * 1-5`; // Weekdays at quiet hour
+     rationale = `Active PR velocity detected (10-20 recently merged PRs), running on weekdays at quietest hour (${quietHour}:00 UTC)`;
   } else if (prs.length > 0) {
      cadenceTier = "standard";
-     scheduleExpr = "0 3 * * 1,4"; // Mondays and Thursdays
-     rationale = "Standard PR velocity detected (<10 recently merged PRs)";
+     scheduleExpr = `0 ${quietHour} * * 1,4`; // Mondays and Thursdays
+     rationale = `Standard PR velocity detected (<10 recently merged PRs), running Mon/Thu at quietest hour (${quietHour}:00 UTC)`;
   }
-
-  // Generate updated schedule data
+// Generate updated schedule data
   const newScheduleData = {
     schedule: scheduleExpr,
     cadence_tier: cadenceTier,
