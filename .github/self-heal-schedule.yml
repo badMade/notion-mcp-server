@@ -1,0 +1,4 @@
+current_schedule: 0 0 * * 0
+tier: dormant
+rationale: 'Dormant: Very low activity. Weekly checks.'
+last_updated: '2023-10-15T00:00:00.000Z'
