@@ -1,0 +1,73 @@
+name: Recompute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 2 * * 1' # Weekly on Monday at 02:00
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Schedule Computation
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Create PR if schedule changed
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Schedule unchanged."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "chore(self-heal): update schedule based on telemetry"
+          git push origin $BRANCH_NAME
+
+          # Avoid thrash duplicate PRs
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number | jq length)
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "Duplicate schedule update PR already open."
+            exit 0
+          fi
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Auto-updated self-healing schedule based on rolling telemetry." \
+            --label "self-heal-schedule,automation"
