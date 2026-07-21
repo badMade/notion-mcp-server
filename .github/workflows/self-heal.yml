@@ -1,0 +1,130 @@
+name: Self-Heal Repair Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')) &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'schedule' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Run Initial Healthcheck
+        id: pre_healthcheck
+        run: |
+          node scripts/healthcheck.mjs
+        continue-on-error: true
+
+      - name: Run Self-Heal Pipeline
+        id: repair
+        run: |
+          node scripts/self_heal.mjs
+        continue-on-error: true
+
+      - name: Verify Healthcheck and Diff
+        id: post_verify
+        run: |
+          node scripts/healthcheck.mjs
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes made."
+            echo "diff_exists=false" >> $GITHUB_ENV
+          else
+            echo "diff_exists=true" >> $GITHUB_ENV
+          fi
+
+          # Check paths explicitly (allowlist / denylist)
+          CHANGES=$(git diff --name-only)
+          if echo "$CHANGES" | grep -q -E '(\.github/workflows/(ci|pr-review)\.yml|\.env|secrets/)'; then
+            echo "Changes in forbidden files detected. Aborting."
+            echo "valid_paths=false" >> $GITHUB_ENV
+            exit 1
+          else
+            echo "valid_paths=true" >> $GITHUB_ENV
+          fi
+
+          # Secret scanning
+          git add .
+          if ! git diff --cached | grep -iE '(secret|api_key|token|password)'; then
+            echo "no_secrets=true" >> $GITHUB_ENV
+          else
+            echo "Secrets found in diff! Aborting."
+            echo "no_secrets=false" >> $GITHUB_ENV
+            exit 1
+          fi
+
+      - name: Check Open PRs and Create PR
+        if: env.diff_exists == 'true' && env.valid_paths == 'true' && env.no_secrets == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          # Cleanup stale PRs
+          gh pr list --label self-heal --state open --json number,updatedAt | jq -c '.[]' | while read i; do
+            updatedAt=$(echo $i | jq -r '.updatedAt')
+            number=$(echo $i | jq -r '.number')
+            diff=$(( ($(date +%s) - $(date -d "$updatedAt" +%s)) / 86400 ))
+            if [ $diff -gt 7 ]; then
+              gh pr close $number -m "Closing stale self-heal PR"
+            fi
+          done
+
+          # Check for recent open PRs
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number | jq length)
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "A self-heal PR is already open. Skipping creation."
+            exit 0
+          fi
+
+          # Determine title based on trigger
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            PR_TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            PR_TITLE="[Self-Heal Reactive] CI fix"
+          else
+            PR_TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "Auto-repair by self-heal pipeline"
+
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "$PR_TITLE" \
+            --body "Auto-generated repair PR. Please review." \
+            --label "automation,self-heal" \
+            --base main
