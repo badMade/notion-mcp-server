@@ -1,0 +1,187 @@
+name: Self-Heal Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')) &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Close stale self-heal PRs
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --label "self-heal" --state open --json number,updatedAt | jq -r '.[] | select((.updatedAt | fromdateiso8601) < (now - 86400)) | .number' | xargs -I {} gh pr close {} --comment "Closing stale self-heal PR" || true
+
+      - name: Check for duplicate open self-heal PR
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PR=$(gh pr list --label "self-heal" --state open --json number | jq 'length')
+          if [ "$OPEN_PR" -gt 0 ]; then
+            echo "An open self-heal PR already exists. Exiting."
+            exit 0
+          fi
+
+      - name: Initial Healthcheck
+        id: pre_healthcheck
+        run: |
+          node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+        continue-on-error: true
+
+      - name: Upload pre-healthcheck logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-healthcheck-log
+          path: pre_healthcheck.log
+
+      - name: Run Self-Heal Repairs
+        id: repair
+        run: |
+          node scripts/self_heal.mjs > repair.log 2>&1
+        continue-on-error: true
+
+      - name: Upload repair logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-log
+          path: repair.log
+
+      - name: Post Healthcheck
+        id: post_healthcheck
+        if: steps.repair.outcome == 'success'
+        run: |
+          node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Upload post-healthcheck logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: post-healthcheck-log
+          path: post_healthcheck.log
+
+      - name: Check Diff
+        id: diff
+        if: steps.post_healthcheck.outcome == 'success'
+        run: |
+          git add .
+          if ! git diff --cached --quiet; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+            git diff --cached --stat > diff_stat.txt
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Secret Scanning
+        if: steps.diff.outputs.has_diff == 'true'
+        run: |
+          if ! git diff --cached | grep -iE '(api_key|token|password|secret)'; then
+             echo "No secrets found."
+          else
+             echo "Secrets found in diff. Aborting."
+             exit 1
+          fi
+
+      - name: Ensure modifications within boundaries (Positive & Negative)
+        if: steps.diff.outputs.has_diff == 'true'
+        run: |
+          changed_files=$(git diff --cached --name-only)
+          for file in $changed_files; do
+            # Negative boundary: explicitly forbidden paths
+            if [[ $file == .github/workflows/ci.yml || $file == .env || $file == secrets/* ]]; then
+               echo "Forbidden file modification: $file. Aborting."
+               exit 1
+            fi
+
+            # Positive boundary: only allowed paths
+            # Assuming standard structure: src/, tests/, scripts/, config files, etc.
+            if [[ ! $file =~ ^(src/|tests/|__tests__/|scripts/|package\.json|package-lock\.json|tsconfig\.json|eslint\.config\.mjs) ]]; then
+               echo "Modification outside allowed boundaries: $file. Aborting."
+               exit 1
+            fi
+          done
+
+      - name: Configure Git User
+        if: steps.diff.outputs.has_diff == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create PR
+        if: steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "Auto-repair CI/drift"
+          git push -u origin $BRANCH_NAME
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            PR_TITLE="[Self-Heal Scheduled] Drift fixes"
+            TRIGGER_REASON="Proactive scheduled run to fix repository drift."
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_TITLE="[Self-Heal Manual] Repair"
+            TRIGGER_REASON="Manually dispatched self-heal run."
+          else
+            PR_TITLE="[Self-Heal Reactive] CI fix"
+            TRIGGER_REASON="Reactive run triggered by CI failure."
+          fi
+
+          RATIONALE=$(grep "rationale:" .github/self-heal-schedule.yml | sed 's/rationale: //') || RATIONALE="Unknown"
+          DRIFT_SUMMARY=$(cat diff_stat.txt)
+
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          PR_BODY="## Trigger Reason
+          ${TRIGGER_REASON}
+
+          ## Schedule Rationale
+          ${RATIONALE}
+
+          ## Drift Summary
+          \`\`\`text
+          ${DRIFT_SUMMARY}
+          \`\`\`
+
+          ## Artifacts
+          Logs for this run can be found [here](${RUN_URL}).
+          "
+
+          gh pr create \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" \
+            --label "automation,self-heal"

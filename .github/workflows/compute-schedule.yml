@@ -1,0 +1,86 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Check for duplicate open schedule PR
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PR=$(gh pr list --label "self-heal-schedule" --state open --json number | jq 'length')
+          if [ "$OPEN_PR" -gt 0 ]; then
+            echo "An open schedule update PR already exists. Exiting to avoid thrashing."
+            exit 0
+          fi
+
+      - name: Run Schedule Computation
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check Diff
+        id: diff
+        run: |
+          git add .
+          if ! git diff --cached --quiet; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure Git User
+        if: steps.diff.outputs.has_diff == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create PR
+        if: steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "Update self-heal schedule based on telemetry"
+          git push -u origin $BRANCH_NAME
+
+          RATIONALE=$(grep "rationale:" .github/self-heal-schedule.yml | sed 's/rationale: //') || RATIONALE="Unknown"
+
+          PR_BODY="## Schedule Update
+          This PR updates the self-heal schedule based on recent repository telemetry.
+
+          **New Rationale:**
+          ${RATIONALE}
+          "
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "$PR_BODY" \
+            --label "automation,self-heal-schedule"
