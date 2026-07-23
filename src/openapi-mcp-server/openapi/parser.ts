@@ -454,7 +454,7 @@ export class OpenAPIToMCPConverter {
       // const zodSchemaStr = jsonSchemaToZod(inputSchema, { module: "cjs" })
       // console.log(zodSchemaStr)
       // // Execute the function with the zod instance
-      // const zodSchema = eval(zodSchemaStr) as z.ZodType
+      // Zod parsing was removed for security reasons
 
       return {
         name: methodName,
