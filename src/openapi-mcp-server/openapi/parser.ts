@@ -249,12 +249,21 @@ export class OpenAPIToMCPConverter {
     return tools
   }
 
+  // ⚡ Bolt Performance Optimization
+  // Caches the converted component schemas instead of re-converting them for every
+  // parameter, request body, and response. This massively reduces redundant work
+  // on large OpenAPI specs like Notion's.
+  private cachedDefs: Record<string, IJsonSchema> | null = null;
   private convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+    if (this.cachedDefs) {
+      return this.cachedDefs;
+    }
     const components = this.openApiSpec.components || {}
     const schema: Record<string, IJsonSchema> = {}
     for (const [key, value] of Object.entries(components.schemas || {})) {
       schema[key] = this.convertOpenApiSchemaToJsonSchema(value, new Set())
     }
+    this.cachedDefs = schema;
     return schema
   }
   /**
