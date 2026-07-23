@@ -1,0 +1,71 @@
+name: Recompute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Run once a week
+  workflow_dispatch:
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install js-yaml
+
+      - name: Setup Git Identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run compute script
+        run: |
+          node scripts/compute_schedule.mjs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for changes
+        id: checks
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.checks.outputs.has_changes == 'true'
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          # Stage the changes and commit
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "chore: Update self-heal schedule based on telemetry"
+          git push origin $BRANCH_NAME
+
+          cat << 'EOF' > pr_body.txt
+          ## Self-Heal Schedule Update
+          This PR was automatically generated to adjust the self-heal schedule based on recent repository activity.
+
+          Please review the updated `self-heal-schedule.yml` file for the exact schedule and rationale.
+          EOF
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body-file pr_body.txt --label "self-heal-schedule"
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
