@@ -1,0 +1,88 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly to re-evaluate schedule
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute_schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute New Schedule
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Update self-heal.yml with new cron
+        if: steps.compute.outputs.schedule_updated == 'true'
+        run: |
+          CRON="${{ steps.compute.outputs.new_schedule }}"
+          # Use | as delimiter for sed to avoid issues with cron expression asterisks/slashes
+          sed -i "s|cron:.*# AUTO-UPDATED|cron: '${CRON}' # AUTO-UPDATED|" .github/workflows/self-heal.yml
+
+      - name: Verify Scope
+        if: steps.compute.outputs.schedule_updated == 'true'
+        run: |
+          # Only allowed to modify schedule yaml and workflow yaml
+          git diff --name-only | grep -vE '^(.github/workflows/self-heal.yml|.github/self-heal-schedule.yml)$' && { echo "Modified file outside allowed scope."; exit 1; } || true
+
+      - name: Create Pull Request
+        if: steps.compute.outputs.schedule_updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          # Note: Pushing changes to workflow files requires a PAT with workflow scope if you want it to trigger other workflows,
+          # or just to modify .github/workflows at all depending on repository settings.
+
+          # Check for open schedule PRs to avoid thrash
+          COUNT=$(gh pr list --label self-heal-schedule --state open --json number | jq '. | length')
+          if [ "$COUNT" -gt 0 ]; then
+            echo "Open schedule PR already exists. Skipping PR creation to avoid thrash."
+            exit 0
+          fi
+
+          BRANCH_NAME="schedule-update-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Update self-heal schedule cadence"
+          git push -u origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Auto-generated PR to update the self-healing pipeline schedule based on recent repository telemetry.
+
+            New Schedule: \`${{ steps.compute.outputs.new_schedule }}\`
+
+            See \`.github/self-heal-schedule.yml\` for the rationale." \
+            --label "automation,self-heal-schedule"

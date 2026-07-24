@@ -1,0 +1,3 @@
+schedule: "0 2 * * *"
+rationale: "Initial bootstrap schedule. Will be updated automatically based on PR and CI telemetry."
+last_updated: "2024-01-01T00:00:00.000Z"
