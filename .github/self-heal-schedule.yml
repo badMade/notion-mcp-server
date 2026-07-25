@@ -1,0 +1,4 @@
+schedule: 0 0 * * *
+rationale: Initial bootstrap schedule (Daily at midnight). Telemetry will adjust this automatically.
+last_updated: '2025-01-01T00:00:00.000Z'
+_comment: AUTO-UPDATED schedule metadata
