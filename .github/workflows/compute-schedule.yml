@@ -1,0 +1,89 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly by default to recompute
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for duplicate active schedule PRs
+        id: check_duplicate
+        run: |
+          RECENT_PRS=$(gh pr list --label self-heal-schedule --state open --json createdAt | jq 'length')
+          if [ "$RECENT_PRS" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "An active self-heal schedule PR already exists, skipping run."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        if: steps.check_duplicate.outputs.duplicate != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.check_duplicate.outputs.duplicate != 'true'
+        run: npm ci
+
+      - name: Run Schedule Computation
+        if: steps.check_duplicate.outputs.duplicate != 'true'
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for Changes
+        id: check_changes
+        if: steps.check_duplicate.outputs.duplicate != 'true'
+        run: |
+          git add .
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          fi
+
+          # Gate: File changes only in schedule files
+          git diff --cached --name-only > changes.txt
+          while read -r file; do
+             if [[ "$file" != .github/workflows/self-heal.yml ]] && [[ "$file" != .github/self-heal-schedule.yml ]]; then
+                echo "Modified forbidden file: $file"
+                exit 1
+             fi
+          done < changes.txt
+
+      - name: Create PR for Schedule Update
+        if: steps.check_duplicate.outputs.duplicate != 'true' && steps.check_changes.outputs.has_diff == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "chore: auto-update self-heal schedule"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Self-computed schedule update based on recent repository telemetry." --label "automation,self-heal,self-heal-schedule"
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
