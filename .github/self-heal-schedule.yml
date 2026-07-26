@@ -1,0 +1,5 @@
+schedule: 0 0 * * 1,4
+rationale: >-
+  Computed low-churn velocity, scheduling twice weekly at the quietest hour
+  (0:00 UTC).
+last_updated: '2026-07-26T00:54:32.150Z'
