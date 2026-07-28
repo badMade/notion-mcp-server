@@ -1,0 +1,89 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')) &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (ci)
+        run: npm ci
+
+      - name: Setup Git Identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for duplicate PRs
+        id: check_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PRS=$(gh pr list --label self-heal --state open --json createdAt -q 'length')
+          if [ "$RECENT_PRS" -gt 0 ]; then
+            echo "Duplicate PR exists. Skipping."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Self-Heal Pipeline
+        id: selfheal
+        if: steps.check_pr.outputs.skip == 'false'
+        continue-on-error: true
+        run: ./scripts/self_heal.mjs
+
+      - name: Determine PR Title
+        id: pr_title
+        if: steps.check_pr.outputs.skip == 'false' && steps.selfheal.outcome == 'success'
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "title=[Self-Heal Scheduled] Drift fixes" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            echo "title=[Self-Heal Reactive] CI fix" >> $GITHUB_OUTPUT
+          else
+            echo "title=[Self-Heal Manual] Repair" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.check_pr.outputs.skip == 'false' && steps.selfheal.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git add .
+          git commit -m "Auto-repair drift"
+          git push -u origin $BRANCH_NAME
+          gh pr create --title "${{ steps.pr_title.outputs.title }}" --body "Automated drift and CI failure repairs. Trigger: ${{ github.event_name }}." --label "self-heal" --label "automation"

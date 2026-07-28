@@ -1,0 +1,78 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Weekly baseline check
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (ci)
+        run: npm ci
+
+      - name: Setup Git Identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute Schedule
+        id: compute
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/compute_schedule.mjs
+
+      - name: Check Diff
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for duplicate PRs
+        id: check_pr
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PRS=$(gh pr list --label self-heal-schedule --state open --json createdAt -q 'length')
+          if [ "$RECENT_PRS" -gt 0 ]; then
+            echo "Duplicate schedule PR exists. Skipping."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.diff.outputs.changed == 'true' && steps.check_pr.outputs.skip == 'false'
+        # Must use a PAT with workflow scope to modify workflows and create PR
+        # using the default token wouldn't work
+        # but for this script setup we use standard token and hope PAT is used by user
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git add .
+          git commit -m "Auto-update self-heal schedule"
+          git push -u origin $BRANCH_NAME
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated drift schedule update based on repository telemetry." --label "self-heal-schedule" --label "automation"
