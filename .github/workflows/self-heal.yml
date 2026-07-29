@@ -1,0 +1,132 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: "0 0 * * 1" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    if: >-
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      )
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git Committer
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Cleanup Stale PRs
+        run: |
+          STALE_DATE=$(date -d "7 days ago" --iso-8601=seconds)
+          for pr in $(gh pr list --label self-heal --search "created:<$STALE_DATE" --json number -q '.[].number'); do
+            gh pr close "$pr" --comment "Auto-closing stale self-heal PR" || true
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Self-Heal Repair
+        id: repair
+        continue-on-error: true
+        run: |
+          chmod +x scripts/self_heal.mjs scripts/healthcheck.mjs
+          node scripts/self_heal.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-heal-logs
+          path: '*.log'
+
+      - name: Check for Duplicate PRs
+        id: duplicate_check
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Found open self-heal PR, skipping new PR creation."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create PR
+        if: steps.duplicate_check.outputs.duplicate == 'false' && steps.repair.outcome == 'success'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH_NAME="selfheal-repair-$(date +%s)"
+            git checkout -b $BRANCH_NAME
+
+            # Entropy check: if we see suspicious patterns, we can abort, but we rely on git add paths as primary safeguard.
+            if git diff | grep -iE '(api_key|token|password|secret)[^a-zA-Z0-9]*='; then
+               echo "Potential secrets detected in diff, aborting PR creation."
+               # Return true so workflow doesnt completely fail, but no PR is made
+               exit 0
+            fi
+
+            # Add specified files only to prevent pushing forbidden changes
+            for path in src/ tests/ package.json package-lock.json eslint.config.mjs; do
+              git add "$path" 2>/dev/null || true
+            done
+
+            git commit -m "Auto-repair dependencies and code formatting"
+            git push origin $BRANCH_NAME
+
+            TITLE="[Self-Heal Manual] Repair"
+            if [ "${{ github.event_name }}" == "schedule" ]; then
+              TITLE="[Self-Heal Scheduled] Drift fixes"
+            elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+              TITLE="[Self-Heal Reactive] CI fix"
+            fi
+
+            PR_BODY="Automated self-healing PR to fix code drift and CI failures. Review logs in actions.\n\n"
+            PR_BODY+="Triggers explained:\n"
+            PR_BODY+="1. Scheduled: Proactive drift detection\n"
+            PR_BODY+="2. CI Failure: Reactive repair trigger\n"
+            PR_BODY+="3. Manual: workflow_dispatch\n\n"
+            PR_BODY+="Checklist:\n"
+            PR_BODY+="- [ ] No unintended source logic changes\n"
+            PR_BODY+="- [ ] All health checks pass\n"
+            PR_BODY+="- [ ] Review workflow logs\n"
+
+            gh pr create \
+              --title "$TITLE" \
+              --body "$PR_BODY" \
+              --label "automation,self-heal" \
+              --base main
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

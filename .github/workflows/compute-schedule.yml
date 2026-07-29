@@ -1,0 +1,79 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 1 * *" # Runs monthly
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: !startsWith(github.ref_name, 'selfheal-')
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Configure Git Committer
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Compute Schedule
+        run: |
+          chmod +x scripts/compute_schedule.mjs
+          node scripts/compute_schedule.mjs || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for Duplicate PRs
+        id: duplicate_check
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Found open self-heal-schedule PR, skipping new PR creation."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create PR
+        if: steps.duplicate_check.outputs.duplicate == 'false'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH_NAME="selfheal-schedule-$(date +%s)"
+            git checkout -b $BRANCH_NAME
+
+            git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+            git commit -m "Update self-heal schedule"
+            git push origin $BRANCH_NAME
+
+            gh pr create \
+              --title "[Self-Heal Schedule] Update cadence" \
+              --body "Automated update to self-healing CI schedule based on telemetry." \
+              --label "automation,self-heal-schedule" \
+              --base main
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
