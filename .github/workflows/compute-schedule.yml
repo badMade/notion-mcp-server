@@ -1,0 +1,90 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Run schedule compute logic
+        run: |
+          npm ci
+          node scripts/compute_schedule.mjs
+
+      - name: Update main self-heal.yml workflow cron
+        run: |
+          if git diff --quiet .github/self-heal-schedule.yml; then
+            echo "Schedule hasn't changed. Exiting."
+            echo "SKIP=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # Extract the new cron from the schedule file
+          NEW_CRON=$(grep -oP "(?<=schedule: \').*(?=\')" .github/self-heal-schedule.yml || grep -oP '(?<=schedule: ").*(?=")' .github/self-heal-schedule.yml || true)
+
+          if [ ! -z "$NEW_CRON" ]; then
+            # Replace the line containing # AUTO-UPDATED with the new cron
+            sed -i "s/cron: '.*' # AUTO-UPDATED/cron: '$NEW_CRON' # AUTO-UPDATED/g" .github/workflows/self-heal.yml
+            sed -i "s/cron: \".*\" # AUTO-UPDATED/cron: '$NEW_CRON' # AUTO-UPDATED/g" .github/workflows/self-heal.yml
+          fi
+
+      - name: Create PR for updated schedule
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit. Exiting."
+            exit 0
+          fi
+
+          # Check for duplicate schedule PRs
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt --jq '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Duplicate self-heal-schedule PR is already open. Exiting."
+            exit 0
+          fi
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+
+          for path in .github/self-heal-schedule.yml .github/workflows/self-heal.yml; do
+            git add "$path" 2>/dev/null || true
+          done
+
+          if git diff --cached --quiet; then
+            echo "No allowed files modified. Exiting."
+            exit 0
+          fi
+
+          git commit -m "[Self-Heal Schedule] Update cadence"
+          git push -u origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated update to the Self-Heal schedule based on recent project velocity telemetry." \
+            --label "self-heal-schedule" \
+            --label "automation"
