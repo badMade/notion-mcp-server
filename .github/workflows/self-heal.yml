@@ -1,0 +1,63 @@
+name: "Self-Heal Pipeline"
+"on":
+  workflow_dispatch: null
+  workflow_run:
+    workflows:
+      - "ci"
+    types:
+      - "completed"
+  schedule:
+    - cron: "0 0 1 * *" # AUTO-UPDATED
+concurrency:
+  group: "selfheal-${{ github.ref }}"
+  cancel-in-progress: true
+permissions:
+  contents: "write"
+  pull-requests: "write"
+  actions: "read"
+jobs:
+  repair:
+    if: "(!startsWith(github.ref_name, 'selfheal-')) &&\n(github.event_name == 'workflow_dispatch' ||\n(github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure') ||\n(github.event_name == 'schedule' && github.ref_name == github.event.repository.default_branch))\n"
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: "actions/checkout@v4"
+        with:
+          fetch-depth: 0
+      - name: "Cleanup Stale PRs"
+        run: "STALE_DATE=$(date -d \"7 days ago\" -Iseconds 2>/dev/null || echo \"\")\nif [ -n \"$STALE_DATE\" ]; then\n  gh pr list --label self-heal --state open --json number,createdAt -q \".[] | select(.createdAt < \\\"$STALE_DATE\\\") | .number\" | xargs -r -I {} gh pr close {} --comment \"Auto-closing stale self-heal PR\" || true\nfi\n"
+        env:
+          GH_TOKEN: "${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}"
+      - name: "Setup Node.js"
+        uses: "actions/setup-node@v4"
+        with:
+          node-version: 20
+      - name: "Install dependencies"
+        run: "npm ci"
+      - name: "Run pre-healthcheck"
+        id: "pre"
+        run: "node scripts/healthcheck.mjs"
+        continue-on-error: true
+      - name: "Run self-heal pipeline"
+        id: "heal"
+        run: "node scripts/self_heal.mjs"
+        continue-on-error: true
+      - name: "Run post-healthcheck"
+        id: "post"
+        run: "node scripts/healthcheck.mjs"
+        continue-on-error: true
+      - name: "Check Git Status"
+        id: "git-status"
+        run: "if [[ -n $(git status --porcelain) ]]; then\n  echo \"diff=true\" >> $GITHUB_OUTPUT\nelse\n  echo \"diff=false\" >> $GITHUB_OUTPUT\nfi\n\ngit add .\nif git diff --cached | grep -iE 'token|secret|password|api_key'; then\n   echo \"secrets=true\" >> $GITHUB_OUTPUT\nelse\n   echo \"secrets=false\" >> $GITHUB_OUTPUT\nfi\n\nif git diff --cached --name-only | grep -E '^(\\.github/workflows/ci\\.yml|\\.env|secrets/|.*/migrations/)'; then\n   echo \"invalid_paths=true\" >> $GITHUB_OUTPUT\nelse\n   echo \"invalid_paths=false\" >> $GITHUB_OUTPUT\nfi\n"
+      - name: "Check Open PRs"
+        id: "check-prs"
+        run: "PR_COUNT=$(gh pr list --label self-heal --state open --json number -q 'length')\necho \"count=$PR_COUNT\" >> $GITHUB_OUTPUT\n"
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Create Pull Request"
+        if: "steps.post.outcome == 'success' && \nsteps.git-status.outputs.diff == 'true' && \nsteps.git-status.outputs.secrets == 'false' &&\nsteps.git-status.outputs.invalid_paths == 'false' &&\nsteps.check-prs.outputs.count == '0'\n"
+        run: "BRANCH=\"selfheal-$(date +%s)\"\ngit checkout -b $BRANCH\ngit config user.name \"github-actions[bot]\"\ngit config user.email \"github-actions[bot]@users.noreply.github.com\"\ngit commit -m \"Auto-repair drift\"\ngit push -u origin $BRANCH\n\nTRIGGER=\"Manual\"\nif [[ \"${{ github.event_name }}\" == \"schedule\" ]]; then TRIGGER=\"Scheduled\"; fi\nif [[ \"${{ github.event_name }}\" == \"workflow_run\" ]]; then TRIGGER=\"Reactive\"; fi\n\ngh pr create --title \"[Self-Heal $TRIGGER] Repair drift\" --body \"Self-healing pipeline detected drift. PTAL.\" --label \"self-heal\"\n"
+        env:
+          GH_TOKEN: "${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}"
+      - name: "Check consecutive failures"
+        if: "failure() && github.event_name == 'schedule'"
+        run: "echo \"::warning::Self-Heal pipeline failed on scheduled run. Please check logs.\"\necho \"## Self-Heal Failed\" >> $GITHUB_STEP_SUMMARY\necho \"The self-healing pipeline failed to complete successfully.\" >> $GITHUB_STEP_SUMMARY\n"

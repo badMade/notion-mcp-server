@@ -1,0 +1,71 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    if: github.ref_name == github.event.repository.default_branch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        run: node scripts/compute_schedule.mjs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate YAML
+        run: node -e "require('js-yaml').load(require('fs').readFileSync('.github/workflows/self-heal.yml', 'utf8'))"
+
+      - name: Check Git Status
+        id: git-status
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check Open PRs
+        id: check-prs
+        run: |
+          PR_COUNT=$(gh pr list --label self-heal-schedule --state open --json number -q 'length')
+          echo "count=$PR_COUNT" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Pull Request
+        if: steps.git-status.outputs.diff == 'true' && steps.check-prs.outputs.count == '0'
+        run: |
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Update self-heal schedule"
+          git push -u origin $BRANCH
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated schedule adjustment based on telemetry." --label "self-heal-schedule"
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
