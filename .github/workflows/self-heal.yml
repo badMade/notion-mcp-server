@@ -1,0 +1,123 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: |
+      (!startsWith(github.ref_name, 'selfheal-')) &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install base dependencies
+        run: npm ci
+
+      - name: Run Self-Heal Pipeline
+        id: self_heal
+        run: |
+          chmod +x scripts/self_heal.mjs scripts/healthcheck.mjs
+          node scripts/self_heal.mjs
+
+      - name: Workflow Failure Annotation
+        if: failure() && github.event_name == 'schedule'
+        run: |
+          echo "::error::Scheduled self-heal workflow failed. Please inspect logs for broken dependencies or missing type stubs."
+
+      - name: Verify Git Diff and No Secrets
+        id: post_check
+        if: steps.self_heal.outcome == 'success'
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No meaningful diff found. Finishing workflow cleanly."
+            exit 0
+          fi
+
+          echo "Checking for obvious secrets..."
+          if git diff | grep -iE "(secret|token|password|key)[=:]" > /dev/null 2>&1; then
+            echo "Potential secret found in diff! Aborting."
+            exit 1
+          fi
+
+          echo "Checking for modified forbidden files..."
+          if git diff --name-only | grep -iE "^(\.github/workflows/ci\.yml|\.env|secrets/|src/.*/migrations/)"; then
+            echo "Forbidden files modified! Aborting."
+            exit 1
+          fi
+
+          echo "Diff verified. Generating PR."
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+
+      - name: Cleanup Stale PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Auto-close stale selfheal PRs older than threshold (e.g. 7 days)
+          SEVEN_DAYS_AGO=$(date -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          gh pr list --label self-heal --state open --json number,createdAt --jq ".[] | select(.createdAt < \"$SEVEN_DAYS_AGO\") | .number" | while read pr_num; do
+            echo "Closing stale PR #$pr_num"
+            gh pr close "$pr_num" -c "Closing stale self-heal PR"
+          done
+
+      - name: Create Pull Request
+        if: steps.post_check.outputs.has_diff == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "[Self-Heal] Auto-repair pipeline output"
+          git push -u origin $BRANCH_NAME
+
+          TITLE=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number | jq length)
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "A self-heal PR is already open. Not creating a duplicate."
+            exit 0
+          else
+            gh pr create \
+              --title "$TITLE" \
+              --body "Self-Heal agent detected drift or CI failure and successfully regenerated auto-fixes. Trigger: ${{ github.event_name }}." \
+              --label "automation,self-heal"
+          fi
