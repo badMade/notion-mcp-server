@@ -1,0 +1,58 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly default baseline
+  workflow_dispatch:
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Tools
+        run: |
+          npm ci
+
+      - name: Compute New Schedule
+        run: |
+          node scripts/compute_schedule.mjs
+
+      - name: Create PR (if schedule changed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Schedule unchanged. Exiting."
+            exit 0
+          fi
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Update self-heal schedule cadence"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR adjusting the self-healing schedule based on recent repository activity metrics." \
+            --label "automation,self-heal-schedule" \
+            --base main
