@@ -1,0 +1,120 @@
+name: Self-Heal Pipeline
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    # Only run scheduled triggers on the default branch
+    if: >
+      (!startsWith(github.ref_name, 'selfheal-')) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Check for duplicate Self-Heal PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close stale PRs older than 7 days
+          gh pr list --label self-heal --state open --json number,createdAt | jq -r '.[] | select(.createdAt < (now - 604800 | todate)) | .number' | xargs -I {} gh pr close {} --comment "Closing stale self-heal PR" || true
+
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number --jq length)
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "open_pr_exists=true" >> $GITHUB_OUTPUT
+            echo "Skipping repair because a self-heal PR is already open."
+          else
+            echo "open_pr_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Pre-Repair Healthcheck
+        if: steps.check_pr.outputs.open_pr_exists == 'false'
+        id: pre_healthcheck
+        run: node scripts/healthcheck.mjs
+        continue-on-error: true
+
+      - name: Run Self-Heal Repair Pipeline
+        if: steps.check_pr.outputs.open_pr_exists == 'false'
+        id: self_heal
+        run: node scripts/self_heal.mjs
+
+      - name: Check git diff and scan for secrets
+        if: steps.check_pr.outputs.open_pr_exists == 'false' && steps.self_heal.outcome == 'success'
+        id: verify_diff
+        run: |
+          # Ensure there is a diff
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No diff found. Exiting."
+            exit 0
+          fi
+
+          # Stage files explicitly
+          git add src/ tests/ scripts/ package*.json .github/self-heal-schedule.yml .github/workflows/self-heal.yml 2>/dev/null || true
+
+          # Scan for entropy (basic secret heuristic: strings with 20+ base64 chars that might be keys)
+          if git diff --staged | grep -qiE "(secret|token|api_key|password).*['\"][a-zA-Z0-9_-]{20,}['\"]"; then
+            echo "❌ ERROR: Potential secrets found in diff. Aborting."
+            git reset
+            exit 1
+          fi
+
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        if: steps.verify_diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "Auto-repair CI and drift issues"
+          git push origin "$BRANCH_NAME"
+
+          TITLE="[Self-Heal] Repair CI and drift issues"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Automated self-healing PR triggered by \`${{ github.event_name }}\`. Please review the changes." \
+            --label "self-heal,automation" \
+            --base main
