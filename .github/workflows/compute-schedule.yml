@@ -1,0 +1,99 @@
+name: Compute Self-Heal Schedule
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly by default
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    name: Compute Optimal Self-Heal Schedule
+    runs-on: ubuntu-latest
+    if: github.ref_name == github.event.repository.default_branch
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Configure Git Committer
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs
+
+      - name: Create Schedule Update PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Only proceed if there's a diff
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Schedule is unchanged."
+            exit 0
+          fi
+
+          # Check for recent open schedule PRs to avoid thrash
+          RECENT_PR=$(gh pr list --label "self-heal-schedule" --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A schedule update PR is already open. Skipping creation."
+            exit 0
+          fi
+
+          # Add schedule configuration files
+          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml || true
+
+          if [ -z "$(git diff --cached --name-only)" ]; then
+            echo "No schedule files modified, skipping PR creation."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Update self-heal schedule based on telemetry"
+          git push origin "$BRANCH_NAME"
+
+          # Create PR body
+          cat << EOF > pr_body.txt
+          ## Automated Schedule Update
+
+          This PR updates the self-healing CI schedule based on recent repository telemetry.
+
+          ### Details
+          The self-heal pipeline automatically adjusts its schedule to match the repository's activity level.
+          Review the \`.github/self-heal-schedule.yml\` file for the rationale behind this new schedule.
+
+          ### Reviewer Checklist
+          - [ ] Review the updated cron expression and rationale
+          - [ ] Merge PR when ready
+          EOF
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body-file pr_body.txt \
+            --label "automation" \
+            --label "self-heal-schedule" \
+            --base "${{ github.event.repository.default_branch || 'main' }}" \
+            --head "$BRANCH_NAME"

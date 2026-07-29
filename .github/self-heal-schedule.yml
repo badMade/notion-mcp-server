@@ -1,0 +1,4 @@
+schedule: "0 0 * * *"
+rationale: "Initial bootstrap schedule based on defaults. To be updated by telemetry."
+last_updated: 0
+override: false
