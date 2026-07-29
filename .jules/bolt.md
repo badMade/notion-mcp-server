@@ -1,0 +1,3 @@
+## 2025-04-18 - [Cache components JSON schema conversion]
+**Learning:** In the `OpenAPIToMCPConverter` class, `convertComponentsToJsonSchema()` was being called inside a loop over all parameters and responses for every method. This results in calculating the whole JSON schemas dictionary repeatedly (O(N*M) complexity), taking seconds for large OpenAPI specifications.
+**Action:** Always verify if complex configuration objects or heavy computations parsed from a constant source (like an OpenAPI spec) are unnecessarily evaluated repeatedly. Cache them within a class property to ensure they are computed only once.
