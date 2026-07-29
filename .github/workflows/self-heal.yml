@@ -1,0 +1,125 @@
+name: Self-Heal Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * 1' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: |
+      (!startsWith(github.ref_name, 'selfheal-')) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'schedule' || github.ref_name == 'main' || github.ref_name == 'master')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Clean Install for tooling
+        run: npm ci
+
+      - name: Check for duplicate open PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "SKIP=true" >> $GITHUB_ENV
+            echo "Duplicate PR found. Skipping."
+          fi
+
+      - name: Run pre-repair healthcheck
+        if: env.SKIP != 'true'
+        run: node scripts/healthcheck.mjs > pre-check.log 2>&1 || true
+
+      - name: Run Self-Heal Pipeline
+        if: env.SKIP != 'true'
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Check path restrictions and secrets
+        if: env.SKIP != 'true' && always()
+        run: |
+          git add -A
+          # Exclude lockfiles from grep search to prevent false positives on hashes
+          if git diff --cached -U0 -- ':!package-lock.json' | grep -iE 'sk_live_|ghp_|AKIA|-----BEGIN (RSA|EC) PRIVATE KEY-----'; then
+            echo "❌ Potential secret in diff. Aborting."
+            exit 1
+          fi
+
+          FORBIDDEN=$(git diff --cached --name-only | grep -E '\.env|secrets/|\.github/workflows/ci\.yml|migrations/' || echo "")
+          if [ "$FORBIDDEN" != "" ]; then
+            echo "❌ Changes detected in forbidden paths: $FORBIDDEN"
+            exit 1
+          fi
+
+      - name: Run post-repair healthcheck
+        if: env.SKIP != 'true' && success()
+        run: node scripts/healthcheck.mjs > post-check.log 2>&1
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+
+      - name: Commit and Create PR
+        if: env.SKIP != 'true' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto-repair codebase drift"
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git push origin HEAD:$BRANCH_NAME
+
+          TITLE="[Self-Heal] Codebase repair"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create \
+            --head $BRANCH_NAME \
+            --title "$TITLE" \
+            --body "Automated fixes applied by Self-Heal Pipeline. Please review logs in the artifact attachment." \
+            --label "self-heal,automation"
