@@ -1,0 +1,5 @@
+schedule: 0 0 1 * *
+rationale: Computed tier 'dormant' based on 0 commits in the last 30 days.
+last_updated: '2026-05-13T00:52:55.481Z'
+
+# AUTO-UPDATED

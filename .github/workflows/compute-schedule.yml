@@ -1,0 +1,83 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    # Run periodically to recompute the self-heal schedule (e.g. daily)
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history needed for telemetry
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for drift
+        id: drift
+        run: |
+          if git status --porcelain | grep -qE "\.github/workflows/self-heal\.yml|\.github/self-heal-schedule\.yml"; then
+            echo "Schedule changed."
+            echo "changed=true" >> $GITHUB_OUTPUT
+            git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
+          else
+            echo "Schedule unchanged. Skipping PR."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prevent duplicate schedule PRs
+        id: check_pr
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number | jq '. | length')
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "Open schedule update PR exists."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.drift.outputs.changed == 'true' && steps.check_pr.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "chore: update self-heal schedule based on telemetry"
+          git push -u origin "$BRANCH_NAME"
+
+          PR_TITLE="[Self-Heal Schedule] Update cadence"
+          PR_BODY="This PR updates the self-heal auto-repair cadence based on recent repository telemetry. Please review and merge to apply the new schedule."
+
+          gh pr create --title "$PR_TITLE" --body "$PR_BODY" --label "self-heal-schedule" --label "automation"
