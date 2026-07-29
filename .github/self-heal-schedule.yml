@@ -1,0 +1,10 @@
+# SELF-HEAL SCHEDULE METADATA
+# This file tracks the dynamically computed schedule for self-healing runs.
+# Do not modify the `# AUTO-UPDATED` comment as it's used for regex replacement.
+# If you want to override the schedule, set your desired cron below and it will
+# be respected until manually changed again.
+
+SCHEDULE: "0 0 * * *" # AUTO-UPDATED
+LAST_UPDATED: "2024-01-01T00:00:00Z"
+RATIONALE: "Bootstrap schedule setup"
+TIER: "standard"
