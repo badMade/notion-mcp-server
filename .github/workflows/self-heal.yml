@@ -1,0 +1,156 @@
+name: Self-Heal Pipeline
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED: Replaced by compute_schedule.mjs dynamically
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    name: Autonomous Codebase Repair
+    runs-on: ubuntu-latest
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      )
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Check for duplicate open self-heal PRs
+        id: pr-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Cleanup stale PRs first (older than 7 days)
+          STALE_DATE=$(date -d "7 days ago" +%Y-%m-%d)
+          STALE_PRS=$(gh pr list --label "self-heal" --search "created:<$STALE_DATE" --json number --jq '.[].number')
+          for pr in $STALE_PRS; do
+            gh pr close "$pr" --comment "Auto-closing stale self-heal PR to make room for fresh attempts."
+          done
+
+          # Check recent PRs
+          RECENT_DATE=$(date -d "1 day ago" +%Y-%m-%dT%H:%M:%SZ)
+          OPEN_PR_COUNT=$(gh pr list --label "self-heal" --state open --search "created:>$RECENT_DATE" --json number | jq length)
+          if [ "$OPEN_PR_COUNT" -gt 0 ]; then
+            echo "duplicate_found=true" >> $GITHUB_OUTPUT
+            echo "A self-healing PR was opened recently. Skipping to avoid duplicate triggers."
+          else
+            echo "duplicate_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Initial pre-healthcheck
+        if: steps.pr-check.outputs.duplicate_found == 'false'
+        id: pre
+        run: node scripts/healthcheck.mjs > pre-check.log 2>&1 || echo "Pre-check failed, continuing to repair..."
+
+      - name: Execute self-healing repairs
+        if: steps.pr-check.outputs.duplicate_found == 'false'
+        id: heal
+        run: |
+          # This runs steps and exits 0 only if it results in healthy+diff.
+          # If it can't fix it, it will exit non-zero.
+          node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Verify post-healthcheck
+        if: steps.pr-check.outputs.duplicate_found == 'false' && success()
+        id: post
+        run: node scripts/healthcheck.mjs > post-check.log 2>&1
+
+      - name: Verify entropy / no secrets in diff
+        if: steps.pr-check.outputs.duplicate_found == 'false' && steps.post.outcome == 'success'
+        run: |
+          # Stage safe files first to allow accurate diff scanning
+          for path in package.json package-lock.json tsconfig.json; do
+            git add "$path" 2>/dev/null || true
+          done
+          git add "src/**/*.ts" 2>/dev/null || true
+          git add "src/**/*.mjs" 2>/dev/null || true
+          git add "tests/**/*.ts" 2>/dev/null || true
+          git add "**/__snapshots__/*" 2>/dev/null || true
+
+          # Check for high-entropy strings indicating possible secrets
+          if git diff --staged | grep -iE 'apikey|api_key|token|secret|password|bearer'; then
+            echo "::error::Detected potential secrets in the diff. Aborting."
+            exit 1
+          fi
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+          retention-days: 7
+
+      - name: Create Self-Heal PR
+        if: steps.pr-check.outputs.duplicate_found == 'false' && steps.post.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Determine title based on trigger
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+            TRIGGER="Scheduled background drift detection."
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+            TRIGGER="Reactive self-repair following a CI failure."
+          else
+            TITLE="[Self-Heal Manual] Repair"
+            TRIGGER="Manual dispatch."
+          fi
+
+          BRANCH_NAME="selfheal-$(date +%Y%m%d%H%M%S)"
+          git checkout -b "$BRANCH_NAME"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git commit -m "Auto-repair: Format, typings, snapshots, and lockfiles"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "### Autonomous Codebase Repair 🤖✨
+
+            **Trigger:** $TRIGGER
+
+            This Pull Request was automatically generated by the self-healing CI pipeline. The pipeline successfully ran automated repair steps (like formatting, dependency re-resolution, and type syncing) to fix codebase drift.
+
+            Logs for the repair process can be found in the Actions tab.
+
+            **Reviewer Checklist:**
+            - [ ] Verify that no logic was inadvertently modified.
+            - [ ] Verify no secrets were added.
+            - [ ] Verify all checks pass successfully.
+
+            *Powered by Claude Code / Jules.*" \
+            --label "self-heal,automation"
