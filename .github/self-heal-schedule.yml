@@ -1,0 +1,3 @@
+LAST_UPDATED: "2026-06-16T01:05:39.021Z"
+SCHEDULE: "0 0 1 * *"
+RATIONALE: "Computed tier 'dormant' based on 0 commits in the last 30 days."
