@@ -1,0 +1,6 @@
+# This file contains the current schedule for the self-healing workflow.
+# It is updated automatically by scripts/compute_schedule.mjs based on telemetry.
+# If you edit this manually, the automation will respect your changes until it feels a recomputation is necessary (e.g. significant PR velocity changes).
+SCHEDULE: "0 0 * * *"
+RATIONALE: "Initial bootstrap schedule (Daily at midnight)."
+LAST_UPDATED: 1715000000000
