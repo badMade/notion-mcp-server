@@ -1,0 +1,98 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly to evaluate cadence
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need git history for telemetry
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Compute New Schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Update GitHub Actions Cron
+        run: |
+          node -e "
+            import fs from 'fs';
+            import yaml from 'js-yaml';
+
+            try {
+              const scheduleData = yaml.load(fs.readFileSync('.github/self-heal-schedule.yml', 'utf-8'));
+              const newCron = scheduleData.schedule;
+
+              if (newCron) {
+                let workflowStr = fs.readFileSync('.github/workflows/self-heal.yml', 'utf-8');
+                workflowStr = workflowStr.replace(/- cron: \".*\" # AUTO-UPDATED/g, \`- cron: \"\${newCron}\" # AUTO-UPDATED\`);
+                fs.writeFileSync('.github/workflows/self-heal.yml', workflowStr, 'utf-8');
+                console.log('Successfully updated self-heal.yml schedule to:', newCron);
+              }
+            } catch(e) {
+              console.error('Failed to update schedule in workflow file', e);
+              process.exit(1);
+            }
+          " --input-type=module
+
+      - name: Check for Changes
+        id: git-check
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No schedule changes needed."
+            echo "changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Create PR
+        if: steps.git-check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for duplicate open schedule PRs
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number -q 'length')
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "There is already an open schedule update PR. Skipping."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH_NAME"
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Auto-update self-heal schedule based on telemetry"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Updates the self-healing CI pipeline schedule based on recent repository telemetry." \
+            --label "self-heal-schedule" \
+            --head "$BRANCH_NAME" \
+            --base main
