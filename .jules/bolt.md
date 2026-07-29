@@ -1,0 +1,3 @@
+## 2024-05-14 - Redundant Schema Conversion
+**Learning:** `convertComponentsToJsonSchema` in `OpenAPIToMCPConverter` is called repeatedly for every tool definition (parameters, inputs, outputs) because it's generating `$defs`. Since `openApiSpec.components` doesn't change during conversion, this leads to unnecessary repeated object traversing and object creation, causing O(N*M) time complexity where N is number of endpoints and M is number of components.
+**Action:** Memoize/cache the result of `convertComponentsToJsonSchema()` per instance so it's only computed once during the lifetime of a converter instance.
