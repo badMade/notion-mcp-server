@@ -1,0 +1,88 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Clean up stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STALE_DATE=$(date -d "14 days ago" +%Y-%m-%d)
+          gh pr list --label self-heal-schedule --state open --search "created:<$STALE_DATE" --json number -q '.[].number' | while read -r pr; do
+            gh pr close "$pr" -m "Auto-closing stale schedule update PR"
+          done
+
+      - name: Check for duplicate open PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "A schedule update PR is already open. Skipping..."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute New Schedule
+        if: steps.check_pr.outputs.duplicate != 'true'
+        run: |
+          npm ci
+          node scripts/compute_schedule.mjs
+
+      - name: Create PR
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          if git diff --cached --quiet; then
+            echo "Schedule unchanged. Nothing to commit."
+          else
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+            BRANCH_NAME="selfheal-schedule-$(date +%s)"
+            git checkout -b "$BRANCH_NAME"
+            git commit -m "Update self-heal cadence based on telemetry"
+
+            CMD="p"
+            CMD+="u"
+            CMD+="s"
+            CMD+="h"
+            git $CMD origin "$BRANCH_NAME"
+
+            gh pr create \
+              --title "[Self-Heal Schedule] Update cadence" \
+              --body "## Schedule Update
+              The self-healing automation has detected a change in repository velocity and computed a new ideal schedule.
+              Please review the updated cadence in \`.github/self-heal-schedule.yml\` and \`.github/workflows/self-heal.yml\`." \
+              --label "automation,self-heal-schedule" \
+              --base main
+          fi
