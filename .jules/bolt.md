@@ -1,0 +1,3 @@
+## 2026-04-22 - Repeated execution of components conversion in OpenAPI Spec
+**Learning:** In the @notionhq/notion-mcp-server codebase, parsing OpenAPI specs involved repeatedly evaluating the entire `components.schemas` and resolving schema references into JSON Schema recursively (`convertComponentsToJsonSchema`) for *every* path parameter, request body, and response schema. For large APIs like Notion's, this caused a massive bottleneck (measured ~11s on a 5000-path mock spec).
+**Action:** Always cache or lazily evaluate shared JSON schemas (`$defs`) when translating large OpenAPI documents rather than evaluating them on a per-endpoint basis.
