@@ -1,0 +1,3 @@
+schedule: '0 0 1 * *'
+rationale: 'Computed tier ''dormant'' based on 0 commits in the past 7 days.'
+last_updated: 1781658281292
