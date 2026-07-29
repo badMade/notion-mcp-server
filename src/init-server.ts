@@ -17,7 +17,8 @@ async function loadOpenApiSpec(specPath: string, baseUrl: string | undefined): P
   let rawSpec: string
 
   try {
-    rawSpec = fs.readFileSync(path.resolve(process.cwd(), specPath), 'utf-8')
+    // ⚡ Bolt Optimization: Use async readFile instead of readFileSync to avoid blocking the event loop during initialization
+    rawSpec = await fs.promises.readFile(path.resolve(process.cwd(), specPath), 'utf-8')
   } catch (error) {
     console.error('Failed to read OpenAPI specification file:', (error as Error).message)
     process.exit(1)
