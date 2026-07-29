@@ -249,12 +249,19 @@ export class OpenAPIToMCPConverter {
     return tools
   }
 
+  private _cachedDefs: Record<string, IJsonSchema> | null = null;
+
+  // ⚡ Bolt: Cache component JSON schemas to avoid redundant recursive evaluations
+  // which can cause O(N * C) overhead and OOM issues for large OpenAPI specs.
   private convertComponentsToJsonSchema(): Record<string, IJsonSchema> {
+    if (this._cachedDefs) return this._cachedDefs;
+
     const components = this.openApiSpec.components || {}
     const schema: Record<string, IJsonSchema> = {}
     for (const [key, value] of Object.entries(components.schemas || {})) {
       schema[key] = this.convertOpenApiSchemaToJsonSchema(value, new Set())
     }
+    this._cachedDefs = schema;
     return schema
   }
   /**
