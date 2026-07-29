@@ -1,0 +1,3 @@
+schedule: "0 0 * * 1"
+rationale: "Dormant tier computed from low commit volume."
+last_updated: "2024-05-20T00:00:00.000Z"
