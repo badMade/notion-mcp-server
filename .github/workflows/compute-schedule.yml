@@ -1,0 +1,82 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Runs daily to adaptively update the main workflow schedule
+  workflow_dispatch:
+
+concurrency:
+  group: schedule-update-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref_name == github.event.repository.default_branch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs > compute.log 2>&1 || true
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compute-schedule-log
+          path: compute.log
+
+      - name: Check Diff
+        id: check_diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "DIFF_EXISTS=1" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: env.DIFF_EXISTS == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for duplicate schedule update PRs
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Duplicate schedule PR exists, aborting"
+            exit 1
+          fi
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml 2>/dev/null || true
+
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -m "Update self-heal schedule cadence"
+
+          git push origin "$BRANCH"
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated PR to update the self-healing schedule based on repository telemetry." \
+            --label self-heal \
+            --label self-heal-schedule \
+            --label automation

@@ -1,0 +1,143 @@
+name: Self-Heal Repair Pipeline
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      github.ref_name == github.event.repository.default_branch &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for duplicate PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Cleanup stale PRs older than 7 days first
+          gh pr list --label self-heal --state open --search "created:<$(date -d '7 days ago' -I)" --json number -q '.[].number' | xargs -I {} gh pr close {}
+
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Duplicate PR exists, aborting"
+            exit 1
+          fi
+
+      - name: Pre-healthcheck
+        id: pre
+        run: node scripts/healthcheck.mjs > pre-check.log 2>&1 || echo "PRE_FAILED=1" >> $GITHUB_ENV
+
+      - name: Repair script
+        id: repair
+        run: node scripts/self_heal.mjs > repair.log 2>&1 || echo "REPAIR_FAILED=1" >> $GITHUB_ENV
+
+      - name: Post-healthcheck
+        id: post
+        run: node scripts/healthcheck.mjs > post-check.log 2>&1 || echo "POST_FAILED=1" >> $GITHUB_ENV
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfheal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+
+      - name: Check Diff
+        id: check_diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "DIFF_EXISTS=1" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: env.POST_FAILED != '1' && env.DIFF_EXISTS == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Stage specific files safely, explicitly skipping restricted files
+          for path in src tests package.json package-lock.json scripts; do
+            git add "$path" 2>/dev/null || true
+          done
+
+          # Add .github files explicitly avoiding ci.yml
+          git add .github/workflows/self-heal.yml .github/workflows/compute-schedule.yml .github/self-heal-schedule.yml 2>/dev/null || true
+
+          # Check for entropy / secrets before commit
+          # When using grep -E, pipe is an OR operator and should NOT be escaped
+          if git diff --staged | grep -i -E -q 'api[_-]?key|secret|token|password'; then
+            echo "Possible secret exposed, aborting"
+            exit 1
+          fi
+
+          # Create branch and commit
+          BRANCH="selfheal-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -m "Auto-repair drift/failure"
+
+          git push origin "$BRANCH"
+
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          SCHEDULE_INFO=$(cat .github/self-heal-schedule.yml)
+
+          BODY="Automated repair PR. Trigger: \`${{ github.event_name }}\`.
+
+          ### Drift Summary
+          The repository experienced drift or CI failures which have been automatically repaired. Please review the changes for correctness.
+
+          ### Self-Scheduling
+          Current configuration:
+          \`\`\`yaml
+          $SCHEDULE_INFO
+          \`\`\`
+
+          ### Artifacts
+          Review the workflow logs:
+          - [Pre-check Log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [Repair Log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [Post-check Log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+          gh pr create --title "$TITLE" \
+            --body "$BODY" \
+            --label self-heal \
+            --label automation
