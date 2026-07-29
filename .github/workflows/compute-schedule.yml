@@ -1,0 +1,87 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Cleanup stale schedule PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find open PRs older than 7 days
+          old_prs=$(gh pr list --label self-heal-schedule --state open --json number,createdAt | jq -r '.[] | select(.createdAt < (now - 604800 | todateiso8601)) | .number')
+          for pr in $old_prs; do
+            echo "Closing stale PR #$pr"
+            gh pr close "$pr" --comment "Auto-closing stale schedule update PR."
+          done
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50 # Needed for telemetry (git log)
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        id: compute
+        run: node scripts/compute_schedule.mjs
+
+      - name: Verify Git Status
+        id: git_status
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for duplicate PRs
+        id: check_pr
+        if: steps.git_status.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal-schedule --state open --json number | jq length)
+          if [ "$count" -gt 0 ]; then
+            echo "Duplicate PR exists. Skipping creation."
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+          else
+             echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        if: steps.git_status.outputs.has_diff == 'true' && steps.check_pr.outputs.duplicate == 'false'
+        with:
+          branch: selfheal-schedule-${{ github.run_id }}
+          commit-message: "Update self-heal schedule based on telemetry"
+          title: "[Self-Heal Schedule] Update cadence"
+          body: "Automated schedule update based on repository telemetry."
+          labels: "self-heal-schedule,automation"
+          add-paths: |
+            .github/workflows/self-heal.yml
+            .github/self-heal-schedule.yml
