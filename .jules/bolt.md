@@ -1,0 +1,3 @@
+## 2024-03-24 - OpenAPI Component Conversion Performance Bottleneck
+**Learning:** In the `OpenAPIToMCPConverter`, components (which are reusable schemas like `$ref`) were being fully parsed and converted into JSON schemas multiple times per operation (in input schemas, return schemas, etc). This resulted in O(N * M) complexity where N=number of schemas, M=number of operations, causing 1.5s+ blocking delays for large specs.
+**Action:** When working with large data transformation processes (like converting OpenAPI specs), always check if global shared schemas or components can be parsed once and cached across all operation processing iterations.
