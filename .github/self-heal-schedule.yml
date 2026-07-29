@@ -1,0 +1,6 @@
+# AUTO-UPDATED
+schedule:
+  cron: 0 0 1 * *
+  tier: dormant
+  rationale: 0 commits in last 30 days
+  last_updated: '2026-05-09T00:53:34.932Z'

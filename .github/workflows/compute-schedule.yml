@@ -1,0 +1,79 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    # Run once a week to re-evaluate the schedule
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute New Schedule
+        run: node scripts/compute_schedule.mjs
+
+      - name: Update Workflow Schedule
+        run: |
+          # Read the computed cron expression from the self-heal-schedule.yml file using a small ESM node script
+          NEW_CRON=$(node --input-type=module -e "import fs from 'fs'; import yaml from 'js-yaml'; const doc = yaml.load(fs.readFileSync('.github/self-heal-schedule.yml', 'utf8')); console.log(doc.schedule.cron);")
+
+          # Use sed to update the workflow file. The `# AUTO-UPDATED` marker is used to locate the right line.
+          sed -i -e "/# AUTO-UPDATED/!b" -e "n;s/^[[:space:]]*- cron:.*/    - cron: '${NEW_CRON}'/" .github/workflows/self-heal.yml
+
+      - name: Check for Changes
+        id: check_changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.check_changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for existing open schedule PRs
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number -q 'length')
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "Open self-heal-schedule PRs detected. Skipping creation to avoid duplicates."
+            exit 0
+          fi
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b $BRANCH_NAME
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "chore: update self-heal schedule"
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated update to the self-healing CI schedule based on recent repository telemetry." \
+            --label "self-heal-schedule,automation" \
+            --head $BRANCH_NAME \
+            --base main
