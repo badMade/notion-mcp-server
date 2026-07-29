@@ -1,0 +1,4 @@
+SCHEDULE: 0 0 * * 0
+RATIONALE: Low/dormant velocity detected (<5 commits/week)
+TIER: dormant
+LAST_UPDATED: '2026-06-26T00:54:28.150Z'
