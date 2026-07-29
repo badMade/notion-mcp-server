@@ -79,7 +79,15 @@ export class OpenAPIToMCPConverter {
 
       const resolved = this.internalResolveRef(ref, resolvedRefs)
       if (!resolved) {
-        // TODO: need extensive tests for this and we definitely need to handle the case of self references
+        // If the reference is already in resolvedRefs, it's a cyclic reference.
+        // We gracefully return a $ref node without an error.
+        if (resolvedRefs.has(ref)) {
+          return {
+            $ref: ref.replace(/^#\/components\/schemas\//, '#/$defs/'),
+            ...('description' in schema ? { description: schema.description as string } : {}),
+          }
+        }
+
         console.error(`Failed to resolve ref ${ref}`)
         return {
           $ref: ref.replace(/^#\/components\/schemas\//, '#/$defs/'),
@@ -185,7 +193,7 @@ export class OpenAPIToMCPConverter {
         if (mcpMethod) {
           const uniqueName = this.ensureUniqueName(mcpMethod.name)
           mcpMethod.name = uniqueName
-          mcpMethod.description = this.getDescription(operation.summary || operation.description || '')
+          mcpMethod.description = this.getDescription(mcpMethod.description || operation.summary || operation.description || '')
           tools[apiName]!.methods.push(mcpMethod)
           openApiLookup[apiName + '-' + uniqueName] = { ...operation, method, path }
           zip[apiName + '-' + uniqueName] = { openApi: { ...operation, method, path }, mcp: mcpMethod }
@@ -208,13 +216,14 @@ export class OpenAPIToMCPConverter {
       for (const [method, operation] of Object.entries(pathItem)) {
         if (!this.isOperation(method, operation)) continue
 
-        const parameters = this.convertOperationToJsonSchema(operation, method, path)
+        const mcpMethod = this.convertOperationToMCPMethod(operation, method, path)
+        if (!mcpMethod) continue
         const tool: ChatCompletionTool = {
           type: 'function',
           function: {
             name: operation.operationId!,
-            description: this.getDescription(operation.summary || operation.description || ''),
-            parameters: parameters as FunctionParameters,
+            description: this.getDescription(mcpMethod.description),
+            parameters: mcpMethod.inputSchema as FunctionParameters,
           },
         }
         tools.push(tool)
@@ -236,11 +245,12 @@ export class OpenAPIToMCPConverter {
       for (const [method, operation] of Object.entries(pathItem)) {
         if (!this.isOperation(method, operation)) continue
 
-        const parameters = this.convertOperationToJsonSchema(operation, method, path)
+        const mcpMethod = this.convertOperationToMCPMethod(operation, method, path)
+        if (!mcpMethod) continue
         const tool: Tool = {
           name: operation.operationId!,
-          description: this.getDescription(operation.summary || operation.description || ''),
-          input_schema: parameters as Tool['input_schema'],
+          description: this.getDescription(mcpMethod.description),
+          input_schema: mcpMethod.inputSchema as Tool['input_schema'],
         }
         tools.push(tool)
       }
