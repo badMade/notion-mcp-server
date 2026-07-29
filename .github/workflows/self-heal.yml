@@ -1,0 +1,153 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    name: Auto-Repair
+    runs-on: ubuntu-latest
+    if: |
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Git setup
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Cleanup stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -d "7 days ago" +%Y-%m-%d)
+          gh pr list --label self-heal --search "created:<$DATE" --json number --jq '.[].number' | while read pr; do
+            gh pr close "$pr" --comment "Auto-closing stale self-heal PR."
+          done || true
+
+      - name: Check for duplicate PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Duplicate open self-heal PR found."
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "duplicate=false" >> $GITHUB_OUTPUT
+
+      - name: Pre-check Health (Optional verification)
+        if: steps.check_pr.outputs.duplicate != 'true'
+        run: |
+          npm ci || true
+          node scripts/healthcheck.mjs > pre-check.log 2>&1 || true
+
+      - name: Run Self-Healing Script
+        id: self_heal
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          REPAIR_LOG_FILE: repair.log
+        run: node scripts/self_heal.mjs
+
+      - name: Post-check Health
+        if: steps.check_pr.outputs.duplicate != 'true' && steps.self_heal.outcome == 'success'
+        run: node scripts/healthcheck.mjs > post-check.log 2>&1
+
+      - name: Check for Secrets in Diff
+        if: steps.check_pr.outputs.duplicate != 'true' && steps.self_heal.outcome == 'success'
+        run: |
+          # Simple entropy/secret scan on unstaged diff
+          if git diff | grep -iE 'api_key|token|secret|password|bearer'; then
+            echo "Potential secret found in diff! Aborting."
+            exit 1
+          fi
+
+      - name: Verify Allowed File Modifications
+        if: steps.check_pr.outputs.duplicate != 'true' && steps.self_heal.outcome == 'success'
+        run: |
+          ALLOWED_REGEX="^src/|^tests/|^scripts/|^package\.json$|^package-lock\.json$"
+          FORBIDDEN_REGEX="^\.github/workflows/ci\.yml$|^\.env$|^secrets/|^src/.*/migrations/"
+
+          git diff --name-only | while read file; do
+            if echo "$file" | grep -qE "$FORBIDDEN_REGEX"; then
+              echo "Error: Modification to forbidden path detected: $file"
+              exit 1
+            fi
+            if ! echo "$file" | grep -qE "$ALLOWED_REGEX"; then
+              echo "Error: Modification to non-allowed path detected: $file"
+              exit 1
+            fi
+          done
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+          retention-days: 7
+
+      - name: Determine PR Title
+        id: pr_title
+        if: steps.check_pr.outputs.duplicate != 'true' && steps.self_heal.outcome == 'success'
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "title=[Self-Heal Scheduled] Drift fixes" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            echo "title=[Self-Heal Reactive] CI fix" >> $GITHUB_OUTPUT
+          else
+            echo "title=[Self-Heal Manual] Repair" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Pull Request
+        if: steps.check_pr.outputs.duplicate != 'true' && steps.self_heal.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: auto-repair by self-heal bot"
+          git push -u origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "${{ steps.pr_title.outputs.title }}" \
+            --body "Automated repair generated by the self-heal bot. Please review the logs in the workflow artifacts." \
+            --label "self-heal,automation" \
+            --base main
