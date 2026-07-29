@@ -1,0 +1,3 @@
+schedule: "0 0 * * *"
+rationale: "Bootstrap schedule (daily) set up during initial self-heal automation configuration."
+last_updated: "2024-05-23T00:00:00Z"
