@@ -1,0 +1,103 @@
+name: Self-Heal Auto-Repair
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    conclusion: failure
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  self-heal:
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Pre-check Health
+        run: ./scripts/healthcheck.mjs > pre-check.log 2>&1 || true
+
+      - name: Run Self-Heal Pipeline
+        run: ./scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Upload Artifact Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+
+      - name: Entropy & Secret Scan
+        run: |
+          git add -A
+          ! git diff --cached -U0 -- ':!package-lock.json' | grep -iE '(key|token|secret)'
+
+      - name: Cleanup Stale PRs
+        run: |
+          gh pr list --search "created:<$(date -d '7 days ago' +%Y-%m-%d) label:self-heal" --state open --json number -q '.[].number' | xargs -I {} gh pr close {}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Duplicate PR Check
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        if: env.SKIP != 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create Pull Request
+        if: env.SKIP != 'true'
+        run: |
+          if git diff --cached --quiet; then
+            echo "No changes to commit, skipping PR creation."
+            exit 0
+          fi
+          git commit -m "chore: automated self-heal repairs"
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH"
+          git push origin "$BRANCH"
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create --title "$TITLE" --body "Automated self-heal repair PR." --label self-heal
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
