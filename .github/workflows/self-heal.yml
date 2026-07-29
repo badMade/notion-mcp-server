@@ -1,0 +1,140 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    # AUTO-UPDATED
+    - cron: "0 2 * * 1" # Fallback/bootstrap schedule
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    # Only run scheduled triggers on the default branch (main).
+    # For workflow_run, only run if the conclusion was 'failure'.
+    if: >
+      (!startsWith(github.ref_name, 'selfheal-')) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Pre-Healthcheck
+        id: pre_healthcheck
+        run: node scripts/healthcheck.mjs || true # Allowed to fail initially
+
+      - name: Run Self-Healing Pipeline
+        id: repair_pipeline
+        run: node scripts/self_heal.mjs || true
+        # self_heal.mjs exits 0 ONLY if healthcheck passes AND there is a diff.
+
+      - name: Post-Healthcheck Verification
+        id: post_healthcheck
+        run: node scripts/healthcheck.mjs
+
+      - name: Check for meaningful git diff
+        id: check_diff
+        if: steps.post_healthcheck.outcome == 'success'
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Ensure allowed file modifications only
+        if: steps.check_diff.outputs.has_diff == 'true'
+        run: |
+          # Fails if any forbidden file is modified
+          if git diff --name-only | grep -q '^\.github/workflows/ci\.yml$'; then
+            echo "❌ Modified forbidden file .github/workflows/ci.yml"
+            exit 1
+          fi
+
+      - name: Check for secrets/entropy in diff
+        if: steps.check_diff.outputs.has_diff == 'true'
+        run: |
+          # Simple regex to catch basic token patterns (e.g. ntn_..., xoxb-...)
+          # In a real scenario, use a proper secrets scanner like trufflesecurity/trufflehog
+          if git diff | grep -iE '(ntn_[a-zA-Z0-9]{32}|xox[baprs]-[0-9]{10,13}-[a-zA-Z0-9]{24}|gh[pousr]_[a-zA-Z0-9]{36}|AIza[0-9A-Za-z-_]{35})'; then
+            echo "❌ Potential secret found in diff. Aborting self-heal."
+            exit 1
+          fi
+
+      - name: Create Pull Request
+        if: steps.check_diff.outputs.has_diff == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Cleanup stale PRs
+          gh pr list --label self-heal --state open --json number,createdAt --jq '.[] | select((.createdAt | fromdateiso8601) < (now - 604800)) | .number' | while read -r pr_number; do
+            if [ -n "$pr_number" ]; then
+              gh pr close "$pr_number" -c "Closing stale self-heal PR"
+            fi
+          done
+
+          # Set PR title based on trigger
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            PR_TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            PR_TITLE="[Self-Heal Reactive] CI fix"
+          else
+            PR_TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          BRANCH_NAME="selfheal-repair-${{ github.run_id }}"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only add specific safe paths. Never use git add -A or git commit -a.
+          # Iterate safely to ignore paths that don't match or don't exist
+          for path in package.json package-lock.json src/ tests/ "*/__snapshots__/*" "*/__tests__/*" docs/; do
+            git add "$path" 2>/dev/null || true
+          done
+
+          # If nothing was staged (because only ignored/forbidden files changed), exit gracefully
+          if git diff --staged --quiet; then
+            echo "No allowed files were modified."
+            exit 0
+          fi
+
+          git checkout -b $BRANCH_NAME
+          git commit -m "$PR_TITLE"
+
+          # Check for open duplicate PRs before pushing
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json number --jq 'length')
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "An open self-heal PR already exists. Aborting."
+            exit 0
+          fi
+
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "$PR_TITLE" \
+            --body "Automated self-healing repair run via **${{ github.event_name }}** trigger. Review artifact logs for details. Please review changes before merging." \
+            --label "self-heal,automation" \
+            --base main
