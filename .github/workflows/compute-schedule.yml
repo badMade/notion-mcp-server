@@ -1,0 +1,92 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update_schedule:
+    if: github.repository == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need git history for telemetry
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Duplicate Schedule PR Check
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number | jq length)
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "An open schedule update PR already exists. Aborting."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute New Schedule
+        if: steps.check_pr.outputs.duplicate == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Check for Diff
+        if: steps.check_pr.outputs.duplicate == 'false'
+        id: check_diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Schedule Update PR
+        if: steps.check_pr.outputs.duplicate == 'false' && steps.check_diff.outputs.diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="schedule-update-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b $BRANCH_NAME
+          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
+          git commit -m "Update self-heal schedule based on telemetry"
+          git push origin $BRANCH_NAME
+
+          cat <<EOF > pr_body.txt
+          Automated PR to update the self-heal schedule based on recent repository telemetry.
+
+          ### Details
+          The \`compute_schedule.mjs\` script evaluated the PR and commit velocity and proposed a new proactive schedule cadence.
+          Rationale is included in the \`.github/self-heal-schedule.yml\` metadata block.
+
+          See the [Actions Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for telemetry query details.
+          EOF
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" \
+                       --body-file pr_body.txt \
+                       --label "self-heal-schedule,automation" \
+                       --base main \
+                       --head $BRANCH_NAME
