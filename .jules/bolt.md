@@ -1,0 +1,3 @@
+## 2024-04-29 - Missing caching for components schema conversion
+**Learning:** In the `OpenAPIToMCPConverter`, components schema conversion was running redundantly across all operations, causing severe performance degradation for large OpenAPI specs (O(N) vs O(1) where N is number of operations). Implementing instance-level caching combined with recursive `Object.freeze` provides both major speedups and protects shared state from mutation by downstream callers.
+**Action:** When working with derived, static state during parsing or generation workflows across iterations, evaluate caching mechanisms tied to the instance's lifecycle and protect the cached state with `Object.freeze()` to avoid accidental mutability.
