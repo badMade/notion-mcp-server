@@ -1,0 +1,37 @@
+import js from "@eslint/js";
+import tseslint from "typescript-eslint";
+import globals from "globals";
+
+export default tseslint.config(
+  {
+    ignores: [
+      "build/**",
+      "dist/**",
+      "bin/**",
+      "coverage/**",
+      ".cache/**",
+      ".yarn/**"
+    ]
+  },
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+        ...globals.jest,
+        ...globals.vitest
+      }
+    },
+    rules: {
+      "@typescript-eslint/ban-ts-comment": "off",
+      "prefer-const": "off",
+      "no-useless-assignment": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unused-vars": "off",
+      "no-empty": ["error", { "allowEmptyCatch": true }],
+      "preserve-caught-error": "off"
+    }
+  }
+);

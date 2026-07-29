@@ -1,0 +1,172 @@
+name: Self-Heal Automation
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'schedule' && github.ref_name == 'main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' && github.ref_name == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Clean Stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STALE_DATE=$(date -d "7 days ago" +%Y-%m-%d)
+          gh pr list --label "self-heal" --search "created:<$STALE_DATE" --state open --json number -q '.[].number' | xargs -I {} gh pr close {} --comment "Auto-closing stale self-heal PR" || true
+
+      - name: Check Duplicate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label "self-heal" --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Duplicate PR found, skipping execution."
+            echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install dependencies
+        if: env.SKIP != 'true'
+        run: npm ci
+
+      - name: Pre-Repair Healthcheck
+        if: env.SKIP != 'true'
+        id: pre_health
+        run: |
+          node scripts/healthcheck.mjs > pre-check.log 2>&1 || echo "PRE_FAIL=true" >> $GITHUB_ENV
+
+      - name: Run Repair Pipeline
+        if: env.SKIP != 'true'
+        id: repair
+        run: |
+          node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-Repair Healthcheck
+        if: env.SKIP != 'true' && steps.repair.outcome == 'success'
+        id: post_health
+        run: |
+          node scripts/healthcheck.mjs > post-check.log 2>&1
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
+
+      - name: Stage Changes
+        if: env.SKIP != 'true' && steps.post_health.outcome == 'success'
+        run: git add -A
+
+      - name: Ensure Diff Exists
+        if: env.SKIP != 'true' && steps.post_health.outcome == 'success'
+        run: |
+          if git diff --cached --quiet; then
+            echo "No allowed files modified. Exiting."
+            exit 0
+          fi
+
+      - name: Security and Entropy Scan
+        if: env.SKIP != 'true' && steps.post_health.outcome == 'success'
+        run: |
+          # Exclude package-lock.json from entropy check
+          if git diff --cached -U0 -- ':!package-lock.json' | grep -iE '(password|secret|token|api_key|key)='; then
+            echo "Secret entropy detected. Aborting."
+            exit 1
+          fi
+
+      - name: File Boundary Constraints (Blocklist)
+        if: env.SKIP != 'true' && steps.post_health.outcome == 'success'
+        run: |
+          FORBIDDEN_FILES=$(git diff --cached --name-only | grep -E '(\.env|secrets/|\.github/workflows/ci\.yml|migrations/)') || true
+          if [ ! -z "$FORBIDDEN_FILES" ]; then
+            echo "Forbidden files modified: $FORBIDDEN_FILES"
+            exit 1
+          fi
+
+      - name: File Boundary Constraints (Allowlist)
+        if: env.SKIP != 'true' && steps.post_health.outcome == 'success'
+        run: |
+          UNALLOWED_FILES=$(git diff --cached --name-only | grep -vE '^(src/|tests/|scripts/|package.*\.json|eslint\.config\.mjs)') || true
+          if [ ! -z "$UNALLOWED_FILES" ]; then
+            echo "Unallowed files modified outside boundaries: $UNALLOWED_FILES"
+            exit 1
+          fi
+
+      - name: Commit and Create PR
+        if: env.SKIP != 'true' && steps.post_health.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --cached --quiet; then exit 0; fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH_NAME="selfheal-repair-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "[Self-Heal] Automated repair"
+          git push origin $BRANCH_NAME
+
+          TITLE="[Self-Heal] Automated repair"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          # Read current config for body
+          CURRENT_SCHEDULE=$(node -e "const c=require('js-yaml').load(require('fs').readFileSync('.github/self-heal-schedule.yml','utf8')); console.log(c.schedule);") || CURRENT_SCHEDULE="unknown"
+          CURRENT_REASON=$(node -e "const c=require('js-yaml').load(require('fs').readFileSync('.github/self-heal-schedule.yml','utf8')); console.log(c.reason);") || CURRENT_REASON="unknown"
+
+          cat << EOB > pr_body.txt
+          ## Self-Healing Pipeline Execution
+
+          **Trigger Reason:** \`${{ github.event_name }}\`
+          **Current Schedule:** \`$CURRENT_SCHEDULE\`
+          **Rationale:** $CURRENT_REASON
+
+          ### Drift Summary
+          The pipeline identified code drift or CI failures and automatically applied fixes across allowed files. Please review the changes carefully.
+
+          ### Artifacts
+          Logs for this execution (pre-check, repair steps, post-check) are uploaded as artifacts to the workflow run. Please verify the [GitHub Actions Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+
+          *Note: This PR was automatically generated by the self-healing workflow.*
+          EOB
+
+          gh pr create --title "$TITLE" --body-file pr_body.txt --label "automation,self-heal"
