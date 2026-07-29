@@ -19,7 +19,7 @@ async function loadOpenApiSpec(specPath: string, baseUrl: string | undefined): P
   try {
     rawSpec = fs.readFileSync(path.resolve(process.cwd(), specPath), 'utf-8')
   } catch (error) {
-    console.error('Failed to read OpenAPI specification file:', (error as Error).message)
+    if (process.env.DEBUG) console.error('Failed to read OpenAPI specification file:', (error as Error).message)
     process.exit(1)
   }
 
@@ -37,7 +37,7 @@ async function loadOpenApiSpec(specPath: string, baseUrl: string | undefined): P
     if (error instanceof ValidationError) {
       throw error
     }
-    console.error('Failed to parse OpenAPI spec:', (error as Error).message)
+    if (process.env.DEBUG) console.error('Failed to parse OpenAPI spec:', (error as Error).message)
     process.exit(1)
   }
 }
