@@ -1,0 +1,4 @@
+schedule: '0 0 * * 1'
+tier: 'dormant'
+last_updated: '2026-06-21T01:07:47.063Z'
+rationale: 'Computed based on PR velocity: 0, CI Failures: 0, Recent empty runs: 0'

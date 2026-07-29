@@ -1,0 +1,88 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # Runs weekly on Sunday
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for Duplicate Schedule PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_DATE=$(date -d "7 days ago" -I)
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --search "created:>=$RECENT_DATE" --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "A recent schedule update PR is already open. Skipping compute."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Run Compute Schedule
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/compute_schedule.mjs > compute.log 2>&1
+
+      - name: Create PR if Changed
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No schedule changes."
+            exit 0
+          fi
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Auto-update self-heal schedule"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated computation determined a new schedule based on repository telemetry." \
+            --label "self-heal-schedule" \
+            --base main \
+            --head "$BRANCH_NAME"
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compute-logs
+          path: compute.log
