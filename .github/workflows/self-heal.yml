@@ -1,0 +1,154 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    - cron: '0 16 * * 1' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      )
+    steps:
+      - name: Stale PR Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -d "7 days ago" +%Y-%m-%d)
+          STALE_PRS=$(gh pr list --label self-heal --state open --search "created:<$DATE" --json number -q '.[].number')
+          for PR in $STALE_PRS; do
+            gh pr close $PR --comment "Closing stale self-heal PR"
+          done
+
+      - name: Check for recent open self-heal PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -d "1 day ago" +%Y-%m-%dT%H:%M:%SZ)
+          RECENT_PR=$(gh pr list --label "self-heal" --state open --search "created:>=$DATE" --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Recent open self-heal PR found. Skipping to avoid duplicate PRs."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+
+      - name: Checkout repository
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        if: env.SKIP != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        if: env.SKIP != 'true'
+        run: npm ci
+
+      - name: Run Pre-Repair Healthcheck
+        if: env.SKIP != 'true'
+        run: node scripts/healthcheck.mjs > pre-check.log 2>&1 || true
+
+      - name: Run Self-Heal Pipeline
+        if: env.SKIP != 'true'
+        run: node scripts/self_heal.mjs
+
+      - name: Run Post-Repair Healthcheck
+        if: env.SKIP != 'true'
+        id: post_check
+        run: node scripts/healthcheck.mjs > post-check.log 2>&1
+
+      - name: Stage Changes
+        if: env.SKIP != 'true' && steps.post_check.outcome == 'success'
+        run: git add -A
+
+      - name: Entropy & Secret Scanning
+        if: env.SKIP != 'true' && steps.post_check.outcome == 'success'
+        run: |
+          if git diff --cached -U0 -- ':!package-lock.json' | grep -iE "(password|secret|token|api_key|key|auth|bearer) *[=:] *[\"'][a-zA-Z0-9_=-]+[\"']"; then
+            echo "Entropy scan detected potential secrets in diff! Aborting."
+            exit 1
+          fi
+
+      - name: Safe Path Constraints
+        if: env.SKIP != 'true' && steps.post_check.outcome == 'success'
+        run: |
+          if git diff --cached --name-only | grep -E "(\.env|secrets/|\.github/workflows/ci\.yml|migrations/)"; then
+            echo "Forbidden file path modified! Aborting."
+            exit 1
+          fi
+
+      - name: Git Config
+        if: env.SKIP != 'true' && steps.post_check.outcome == 'success'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and Create PR
+        if: env.SKIP != 'true' && steps.post_check.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Exiting."
+            exit 0
+          fi
+
+          git commit -m "chore(self-heal): automated repair"
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git push origin $BRANCH_NAME
+
+          TITLE="[Self-Heal] Automated drift repair"
+          BODY="Automated drift fixes applied.\\n\\n## Triggers\\nThis PR was triggered by automated self-healing CI processes.\\n\\n## Checklist\\n- [ ] Review pre-check and repair logs.\\n- [ ] Ensure logic wasn't modified.\\n- [ ] No secrets leaked.\\n\\nPlease review the attached artifacts."
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+            BODY="Automated proactive drift fixes applied.\\n\\n## Triggers\\nScheduled (Proactive) trigger. See SELF_HEAL_SETUP.md for telemetry scheduling.\\n\\n## Checklist\\n- [ ] Review pre-check and repair logs.\\n- [ ] Ensure logic wasn't modified.\\n- [ ] No secrets leaked.\\n\\nPlease review the attached artifacts."
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+            BODY="Automated reactive drift fixes applied after a CI failure.\\n\\n## Triggers\\nCI Failure (Reactive) trigger.\\n\\n## Checklist\\n- [ ] Review pre-check and repair logs.\\n- [ ] Ensure logic wasn't modified.\\n- [ ] No secrets leaked.\\n\\nPlease review the attached artifacts."
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+            BODY="Automated drift fixes applied via manual dispatch.\\n\\n## Triggers\\nManual Dispatch.\\n\\n## Checklist\\n- [ ] Review pre-check and repair logs.\\n- [ ] Ensure logic wasn't modified.\\n- [ ] No secrets leaked.\\n\\nPlease review the attached artifacts."
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "self-heal" \
+            --label "automation"
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfheal-logs
+          path: |
+            pre-check.log
+            repair.log
+            post-check.log
