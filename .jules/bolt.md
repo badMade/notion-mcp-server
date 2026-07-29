@@ -1,0 +1,3 @@
+## 2023-10-27 - O(N*M) caching in OpenAPI Parsing
+**Learning:** In codebases where operations are created dynamically by iterating over shared components (like extracting `convertComponentsToJsonSchema` from OpenAPI specs per-method), lack of memoization or caching causes extreme redundant processing scaling at O(N * M) (number of paths * number of components).
+**Action:** When working on parser/converter tools that iterate through large external schemas or definitions, look for subroutines that compute large structural dependencies unvaryingly, and apply caching to significantly improve conversion overhead time.
