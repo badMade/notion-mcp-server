@@ -1,0 +1,94 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Daily check to adapt schedule if needed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Git Committer
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Duplicate PR Check
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RECENT_PR=$(gh pr list --label "self-heal-schedule" --state open --json createdAt -q '.[0].createdAt')
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Open schedule PR already exists. Skipping compute."
+            echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install dependencies
+        if: env.SKIP != 'true'
+        run: npm ci
+
+      - name: Compute new schedule
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Validate YAML
+        if: env.SKIP != 'true'
+        run: |
+          node -e "require('js-yaml').load(require('fs').readFileSync('.github/self-heal-schedule.yml', 'utf8'))"
+          node -e "require('js-yaml').load(require('fs').readFileSync('.github/workflows/self-heal.yml', 'utf8'))"
+
+      - name: Stage Changes
+        if: env.SKIP != 'true'
+        run: git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+
+      - name: Check Diff
+        if: env.SKIP != 'true'
+        id: check_diff
+        run: |
+          if git diff --cached --quiet; then
+            echo "No changes to schedule. Skipping PR."
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+          else
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create PR
+        if: env.SKIP != 'true' && env.HAS_CHANGES == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+
+          git commit -m "auto: update self-heal schedule cadence"
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Automated telemetry-based adjustment to the self-healing schedule." \
+            --label "self-heal-schedule,automation" \
+            --base main
