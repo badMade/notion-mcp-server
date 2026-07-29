@@ -3,6 +3,7 @@ import OpenAPIClientAxios from 'openapi-client-axios'
 import type { AxiosInstance } from 'axios'
 import FormData from 'form-data'
 import fs from 'fs'
+import path from 'path'
 import { Headers } from './polyfill-headers'
 import { isFileUploadParameter } from '../openapi/file-upload'
 
@@ -79,9 +80,27 @@ export class HttpClient {
           throw new Error(`Unsupported file type: ${typeof filePath}`)
       }
       function addFile(name: string, filePath: string) {
-          try {
-            const fileStream = fs.createReadStream(filePath)
-            formData.append(name, fileStream)
+        // Path traversal validation
+        const allowedDirsRaw = process.env.MCP_ALLOWED_DIRECTORIES
+        if (allowedDirsRaw) {
+          const allowedDirs = allowedDirsRaw.split(',')
+            .map((dir) => dir.trim())
+            .filter(Boolean)
+            .map((dir) => path.resolve(dir))
+          const resolvedFilePath = path.resolve(filePath)
+          const isAllowed = allowedDirs.some((dir) => {
+            const relative = path.relative(dir, resolvedFilePath)
+            return !relative.startsWith('..') && !path.isAbsolute(relative)
+          })
+
+          if (!isAllowed) {
+            throw new Error(`Access denied: File path ${filePath} is not in allowed directories`)
+          }
+        }
+
+        try {
+          const fileStream = fs.createReadStream(filePath)
+          formData.append(name, fileStream)
         } catch (error) {
           throw new Error(`Failed to read file at ${filePath}: ${error}`)
         }
