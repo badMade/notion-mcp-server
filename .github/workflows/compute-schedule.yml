@@ -1,0 +1,106 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly to re-evaluate schedule
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-schedule:
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for duplicate schedule PRs
+        run: |
+          RECENT_PR=$(gh pr list --label self-heal-schedule --state open --json createdAt -q '.[0].createdAt' || echo "null")
+          if [ ! -z "$RECENT_PR" ] && [ "$RECENT_PR" != "null" ]; then
+            echo "Open schedule PR already exists. Skipping."
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run schedule computation
+        if: env.SKIP != 'true'
+        id: compute
+        run: |
+          OLD_CRON=$(grep -oP 'cron: \K.*(?= # AUTO-UPDATED)' .github/workflows/self-heal.yml | tr -d "'" | xargs || true)
+          node scripts/compute_schedule.mjs
+
+          # Read newly generated schedule
+          NEW_CRON=$(grep -oP 'schedule: \K.*' .github/self-heal-schedule.yml | tr -d "'" || true)
+
+          if [ "$OLD_CRON" == "$NEW_CRON" ]; then
+            echo "Schedule unchanged."
+            echo "SKIP_PR=true" >> $GITHUB_ENV
+          else
+            echo "Updating workflow YAML inline."
+            sed -i "s|cron: .* # AUTO-UPDATED|cron: '$NEW_CRON' # AUTO-UPDATED|g" .github/workflows/self-heal.yml
+
+            # Validate YAML is parseable after sed
+            if ! node -e "require('js-yaml').load(require('fs').readFileSync('.github/workflows/self-heal.yml', 'utf8'))"; then
+              echo "Error: Sed replacement produced invalid YAML in self-heal.yml"
+              git checkout .github/workflows/self-heal.yml
+              exit 1
+            fi
+          fi
+
+      - name: Verify allowed file changes
+        if: env.SKIP != 'true' && env.SKIP_PR != 'true'
+        run: |
+          git add -A
+          # Ensure only self-heal schedule related files are modified
+          OTHER_FILES=$(git diff --cached --name-only | grep -vE '^(\.github/workflows/self-heal\.yml|\.github/self-heal-schedule\.yml)$' || true)
+          if [ ! -z "$OTHER_FILES" ]; then
+            echo "Unexpected files modified during schedule computation: $OTHER_FILES"
+            git reset HEAD
+            exit 1
+          fi
+
+          if git diff --cached --quiet; then
+            echo "No meaningful changes found."
+            echo "SKIP_PR=true" >> $GITHUB_ENV
+          fi
+
+      - name: Create Pull Request
+        if: env.SKIP != 'true' && env.SKIP_PR != 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH
+          git commit -m "Auto-update self-heal schedule"
+          git push -u origin $BRANCH
+
+          TITLE="[Self-Heal Schedule] Update cadence"
+
+          gh pr create --title "$TITLE" \
+            --body "Automated PR to update the self-healing schedule based on telemetry." \
+            --label "self-heal-schedule,automation"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
