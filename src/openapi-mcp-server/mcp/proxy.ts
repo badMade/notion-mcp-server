@@ -97,10 +97,11 @@ export class MCPProxy {
             },
           ],
         }
-      } catch (error) {
-        console.error('Error in tool call', error)
+      } catch (error: any) {
+        // 🛡️ Sentinel: Do not log the full error object to avoid exposing sensitive info
+        console.error(`Error in tool call: ${error.message || String(error)}`)
         if (error instanceof HttpClientError) {
-          console.error('HttpClientError encountered, returning structured error', error)
+          console.error(`HttpClientError encountered: ${error.message} (Status: ${error.status})`)
           const data = error.data?.response?.data ?? error.data ?? {}
           return {
             content: [
