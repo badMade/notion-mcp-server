@@ -1,0 +1,3 @@
+## 2025-04-11 - Cache Components JSON Schema in MCP Converter
+**Learning:** In `@notionhq/notion-mcp-server`, the `OpenAPIToMCPConverter` parses large OpenAPI specifications (like Notion's) to create MCP tool methods. `convertComponentsToJsonSchema` was traversing `components.schemas` and resolving all references from scratch for *every* method parameter and request/return body, leading to massive redundant work and taking around 43ms for 500 components per invocation.
+**Action:** When implementing classes that parse immutable objects containing large reference structures (like OpenAPI schemas), always cache the converted form of static root dictionaries (e.g., `components`) at the class instance level to avoid re-computing them during operations processing.
