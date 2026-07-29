@@ -1,0 +1,4 @@
+schedule: 0 0 * * 0
+rationale: Low commit velocity (0 commits last month), running weekly.
+last_updated: '2026-05-07T00:46:22.706Z'
+_marker: '# AUTO-UPDATED'
