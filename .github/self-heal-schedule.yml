@@ -1,0 +1,4 @@
+schedule: 0 0 * * 0
+rationale: Dormant repository detected. Scheduling weekly runs.
+last_updated: '2026-07-30T01:10:26.839Z'
+# AUTO-UPDATED
