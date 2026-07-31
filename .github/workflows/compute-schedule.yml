@@ -1,0 +1,66 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    if: github.ref_name == 'main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install js-yaml@4 eslint @eslint/js typescript-eslint prettier globals -D
+
+      - name: Git Config
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute New Schedule
+        id: compute
+        run: node scripts/compute_schedule.mjs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Duplicate PR
+        id: check_pr
+        if: steps.compute.outputs.changed == 'true'
+        run: |
+          if gh pr list --label self-heal-schedule --state open --json createdAt | grep -q 'createdAt'; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create PR
+        if: steps.compute.outputs.changed == 'true' && steps.check_pr.outputs.duplicate != 'true'
+        run: |
+          git add .
+          git commit -m "chore: update self-heal schedule"
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git push origin $BRANCH_NAME
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "New schedule computed from telemetry." --label "automation,self-heal,self-heal-schedule"
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}

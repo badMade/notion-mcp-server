@@ -1,0 +1,2 @@
+schedule: '0 2 * * *' # AUTO-UPDATED
+rationale: Initial schedule set to 2 AM UTC daily.
