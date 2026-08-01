@@ -1,0 +1,2 @@
+SELFHEAL_SCHEDULE: "0 10 * * *"
+RATIONALE: "Initial setup based on git commit history telemetry"

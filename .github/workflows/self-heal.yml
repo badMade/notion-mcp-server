@@ -1,0 +1,62 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: "0 10 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  repair:
+    if: |
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')) && !startsWith(github.ref_name, 'selfheal-') && (github.event_name != 'schedule' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: git config user.name "github-actions[bot]" && git config user.email "github-actions[bot]@users.noreply.github.com"
+      - run: npm install
+      - run: node scripts/healthcheck.mjs pre || true
+      - id: post
+        run: node scripts/self_heal.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: healthcheck-logs
+          path: healthcheck-*.log
+          if-no-files-found: ignore
+      - if: steps.post.outcome == 'success'
+        run: |
+          git add .
+          if [ -z "$(git diff --cached --name-only)" ]; then exit 1; fi
+          if git diff --cached | grep -i -E 'token|secret|password|key|bearer|auth'; then exit 1; fi
+          if git diff --cached --name-only | grep -E -v '^(src/|tests/|test/|package\.json|package-lock\.json|eslint\.config\.mjs|go\.mod|go\.sum|pom\.xml|.*\.csproj)$'; then exit 1; fi
+          if git diff --cached --name-only | grep -E '^(\.github/workflows/ci\.yml|\.env|secrets/|src/.*/migrations/)'; then exit 1; fi
+      - if: steps.post.outcome == 'success'
+        env: { GH_TOKEN: "${{ secrets.PAT_WITH_WORKFLOW_SCOPE != '' && secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}" }
+        run: |
+          if [ "$(gh pr list --label self-heal --state open --json number | jq length)" -gt 0 ]; then exit 0; fi
+          branch="selfheal-$(date +%s)"
+          git checkout -b "$branch"
+          git commit -m "chore: repair"
+          git push -u origin "$branch"
+
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh pr create --title "$TITLE" --body "Triggered by: $GITHUB_EVENT_NAME. Artifacts: $run_url" --label "automation,self-heal"
