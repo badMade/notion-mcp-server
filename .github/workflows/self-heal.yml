@@ -39,12 +39,11 @@ jobs:
           git add .
           if [ -z "$(git diff --cached --name-only)" ]; then exit 1; fi
           if git diff --cached | grep -i -E 'token|secret|password|key|bearer|auth'; then exit 1; fi
-          if git diff --cached --name-only | grep -E -v '^(src/|tests/|test/|package\.json|package-lock\.json|eslint\.config\.mjs)$'; then exit 1; fi
+          if git diff --cached --name-only | grep -E -v '^(src/|tests/|test/|package\.json|package-lock\.json|eslint\.config\.mjs|go\.mod|go\.sum|pom\.xml|.*\.csproj)$'; then exit 1; fi
           if git diff --cached --name-only | grep -E '^(\.github/workflows/ci\.yml|\.env|secrets/|src/.*/migrations/)'; then exit 1; fi
       - if: steps.post.outcome == 'success'
         env: { GH_TOKEN: "${{ secrets.PAT_WITH_WORKFLOW_SCOPE != '' && secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}" }
         run: |
-          gh pr list --label self-heal --state open --json number | jq '.[].number' | while read pr_num; do gh pr close "$pr_num" -c "Closing stale self-heal PR" || true; done
           if [ "$(gh pr list --label self-heal --state open --json number | jq length)" -gt 0 ]; then exit 0; fi
           branch="selfheal-$(date +%s)"
           git checkout -b "$branch"
