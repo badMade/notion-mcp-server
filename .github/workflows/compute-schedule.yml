@@ -1,0 +1,28 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+jobs:
+  compute:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: { contents: write, pull-requests: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install js-yaml@4
+      - run: git config user.name "github-actions[bot]" && git config user.email "github-actions[bot]@users.noreply.github.com"
+      - run: node scripts/compute_schedule.mjs
+      - env: { GH_TOKEN: "${{ secrets.PAT_WITH_WORKFLOW_SCOPE != '' && secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}" }
+        run: |
+          git add .
+          if [ -z "$(git diff --cached --name-only)" ]; then exit 0; fi
+          if [ "$(gh pr list --label self-heal-schedule --state open --json number | jq length)" -gt 0 ]; then exit 0; fi
+          branch="selfheal-schedule-$(date +%s)"
+          git checkout -b "$branch"
+          git commit -m "chore: update schedule"
+          git push -u origin "$branch"
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Updated schedule" --label "automation,self-heal-schedule"
