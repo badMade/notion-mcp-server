@@ -1,0 +1,138 @@
+name: Self-Heal Repair
+on:
+  schedule:
+    - cron: '0 3 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    if: >
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      ) &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      github.repository == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pre-healthcheck
+        id: pre
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs
+
+      - name: Run Self-Heal
+        id: heal
+        continue-on-error: true
+        run: node scripts/self_heal.mjs
+
+      - name: Post-healthcheck
+        id: post
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs
+
+      - name: Check Diff & Boundaries
+        id: diff
+        if: steps.post.outcome == 'success'
+        run: |
+          git add .
+
+          if git diff --cached --name-only | grep -iE '(api_key|token|secret|password|credential)'; then
+            echo "Secrets detected in diff, aborting."
+            exit 1
+          fi
+
+          DENYLIST=".github/workflows/ci.yml .env secrets/ src/**/migrations/"
+          for file in $(git diff --cached --name-only); do
+            for pattern in $DENYLIST; do
+              if [[ "$file" == $pattern* ]]; then
+                echo "Change in forbidden path $file, aborting."
+                exit 1
+              fi
+            done
+          done
+
+          ALLOWLIST="src/ tests/ scripts/ package.json package-lock.json tsconfig.json eslint.config.mjs"
+          for file in $(git diff --cached --name-only); do
+            allowed=false
+            for pattern in $ALLOWLIST; do
+              if [[ "$file" == $pattern* ]]; then
+                allowed=true
+                break
+              fi
+            done
+            if [[ "$allowed" == "false" ]]; then
+              echo "Change in non-allowed path $file, aborting."
+              exit 1
+            fi
+          done
+
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Duplicate PR Check
+        id: dupe
+        if: steps.diff.outcome == 'success' && steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          for pr in $(gh pr list --label "self-heal" --state open --json number,createdAt --jq '.[] | select(.createdAt < (now - 86400 | todate)) | .number'); do
+            gh pr close "$pr" --comment "Auto-closing stale self-heal PR."
+          done
+
+          if gh pr list --label "self-heal" --state open | grep -q .; then
+            echo "Open self-heal PR exists, skipping."
+            exit 1
+          fi
+
+      - name: Create Pull Request
+        if: steps.dupe.outcome == 'success' && steps.diff.outcome == 'success' && steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Auto-repair drift and formatting"
+          git push -u origin "$BRANCH_NAME"
+
+          TITLE="[Self-Heal] Auto-repair formatting and drift"
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create --title "$TITLE" --body "Self-healing automation run." --label "self-heal,automation" --head "$BRANCH_NAME" --base main
