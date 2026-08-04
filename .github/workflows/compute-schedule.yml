@@ -1,0 +1,63 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compute new schedule
+        id: compute
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Create PR if changed
+        if: steps.compute.outcome == 'success' && env.PAT_WITH_WORKFLOW_SCOPE != ''
+        env:
+          PAT_WITH_WORKFLOW_SCOPE: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+          GITHUB_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            BRANCH_NAME="schedule-update-$(date +%s)"
+            git checkout -b $BRANCH_NAME
+            git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+
+            OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number -q 'length')
+            if [ "$OPEN_PRS" -gt 0 ]; then
+              echo "A schedule update PR already exists. Skipping."
+              exit 0
+            fi
+
+            git commit -m "Update self-heal schedule"
+            git push origin $BRANCH_NAME
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated PR to update the self-healing schedule based on latest telemetry." --label "automation,self-heal-schedule"
+          fi
