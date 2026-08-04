@@ -1,0 +1,4 @@
+schedule: "0 12 * * *" # AUTO-UPDATED
+tier: "standard"
+lastUpdated: "2023-01-01T00:00:00.000Z"
+rationale: "Initial bootstrap schedule based on default settings."
