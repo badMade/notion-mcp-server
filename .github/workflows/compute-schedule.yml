@@ -1,0 +1,67 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Run compute schedule
+        run: node scripts/compute_schedule.mjs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for duplicate PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh pr list --label self-heal-schedule --state open --json number -q '. | length' | grep -q -v '^0$'; then
+            echo "Open schedule PR already exists. Aborting."
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "duplicate=false" >> $GITHUB_OUTPUT
+
+      - name: Create PR
+        if: steps.check_pr.outputs.duplicate == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          if [ -z "${{ env.GH_TOKEN }}" ]; then
+            echo "PAT_WITH_WORKFLOW_SCOPE missing. Falling back."
+          fi
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No diff. Exiting."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch_name="selfheal-schedule-$(date +%s)"
+          git checkout -b $branch_name
+          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
+          git commit -m "Update self-heal schedule"
+          git push -u origin $branch_name
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated PR to update self-heal schedule based on telemetry." --label "automation,self-heal-schedule"
