@@ -1,0 +1,42 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+concurrency:
+  group: compute-schedule
+  cancel-in-progress: true
+jobs:
+  compute:
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - id: compute
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          node scripts/compute_schedule.mjs
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          if git diff --cached --quiet; then exit 0; fi
+          echo "diff=true" >> $GITHUB_OUTPUT
+          if [ -n "$GH_TOKEN" ] && [ "$(gh pr list --label self-heal-schedule --state open --json number --jq 'length')" -gt 0 ]; then
+            echo "dup=true" >> $GITHUB_OUTPUT
+          fi
+      - if: steps.compute.outputs.diff == 'true' && steps.compute.outputs.dup != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          B="schedule-update-$(date +%s)"
+          git checkout -b $B
+          git commit -m "Update self-heal schedule"
+          git push origin $B
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Schedule updated based on telemetry." --label "automation,self-heal-schedule"
