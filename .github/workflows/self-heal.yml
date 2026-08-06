@@ -1,0 +1,76 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: '0 0 * * 0' # AUTO-UPDATED
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  repair:
+    if: |
+      ((github.event_name == 'schedule') ||
+       (github.event_name == 'workflow_dispatch') ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')) &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: node scripts/healthcheck.mjs
+        id: pre
+        continue-on-error: true
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            if [ "$(gh pr list --label self-heal --state open --json number --jq 'length')" -gt 0 ]; then
+              echo "dup=true" >> $GITHUB_OUTPUT
+            fi
+            for pr in $(gh pr list --label self-heal --state open --json number --jq '.[].number'); do
+              gh pr close $pr --comment "Closing stale self-heal PR" || true
+            done
+          fi
+      - id: repair
+        if: steps.check.outputs.dup != 'true'
+        run: node scripts/self_heal.mjs
+        continue-on-error: true
+      - id: post
+        if: steps.check.outputs.dup != 'true'
+        run: node scripts/healthcheck.mjs
+      - id: gate
+        if: steps.post.outcome == 'success' && steps.check.outputs.dup != 'true'
+        run: |
+          git add .
+          if git diff --cached --quiet; then exit 0; fi
+          echo "diff=true" >> $GITHUB_OUTPUT
+          if git diff --cached | grep -iE 'api_key|token|secret|password'; then exit 1; fi
+          for f in $(git diff --cached --name-only); do
+            if ! echo "$f" | grep -qE '^(src/|tests/|package\.json|package-lock\.json|eslint\.config\.mjs|scripts/)'; then exit 1; fi
+            if echo "$f" | grep -qE '^(\.github/workflows/ci\.yml|\.env|secrets/)'; then exit 1; fi
+          done
+      - if: steps.gate.outputs.diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          B="selfheal-$(date +%s)"
+          git checkout -b $B
+          git commit -m "Auto-repair drift"
+          git push origin $B
+          TITLE="[Self-Heal] Drift fixes"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then TITLE="[Self-Heal Reactive] CI fix"; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then TITLE="[Self-Heal Manual] Repair"; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then TITLE="[Self-Heal Scheduled] Drift fixes"; fi
+          gh pr create --title "$TITLE" --body "Trigger: ${{ github.event_name }}" --label "automation,self-heal"
