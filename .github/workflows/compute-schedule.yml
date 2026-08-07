@@ -1,0 +1,64 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check for recent open schedule PRs
+        id: check_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label "self-heal-schedule" --state open --json number -q 'length')
+          if [ "$OPEN_PRS" -gt "0" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run compute
+        if: steps.check_pr.outputs.skip == 'false'
+        run: |
+          npm ci
+          chmod +x scripts/compute_schedule.mjs
+          node scripts/compute_schedule.mjs
+
+      - name: Create PR
+        if: steps.check_pr.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_WITH_WORKFLOW_SCOPE || secrets.GITHUB_TOKEN }}
+        run: |
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            BRANCH_NAME="schedule-update-$(date +%s)"
+            git checkout -b $BRANCH_NAME
+            git commit -am "Update self-heal schedule"
+            git push -u origin $BRANCH_NAME
+            gh pr create --title "[Self-Heal Schedule] Update cadence" \
+              --body "Auto-computed schedule update." \
+              --label "automation,self-heal-schedule"
+          fi
