@@ -1,0 +1,68 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm install js-yaml@4
+
+      - name: Run Compute
+        id: compute
+        run: node scripts/compute_schedule.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Duplicate Schedule PR
+        id: check_pr
+        if: steps.compute.outputs.schedule_changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal-schedule --state open --json number | jq length)
+          if [ "$count" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Duplicate schedule PR exists."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.compute.outputs.schedule_changed == 'true' && steps.check_pr.outputs.duplicate == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b $BRANCH_NAME
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "chore: update self-heal schedule"
+          git push -u origin $BRANCH_NAME
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" \
+                       --body "Automated update of self-heal schedule based on telemetry." \
+                       --label "automation,self-heal-schedule" \
+                       --base ${{ github.event.repository.default_branch }} \
+                       --head $BRANCH_NAME

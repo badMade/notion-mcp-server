@@ -1,0 +1,3 @@
+schedule: 0 0 * * * # AUTO-UPDATED
+rationale: Initial bootstrap schedule based on moderate telemetry default.
+last_updated: "2023-01-01T00:00:00.000Z"

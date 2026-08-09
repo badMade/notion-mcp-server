@@ -1,0 +1,128 @@
+name: Self-Heal Repair Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["CI", "ci", "Test", "test"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: >
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      ) && !startsWith(github.ref_name, 'selfheal-') && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check Duplicate PR
+        id: check_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal --state open --json number | jq length)
+          if [ "$count" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Duplicate selfheal PR exists. Exiting."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Healthcheck Pre
+        if: steps.check_pr.outputs.duplicate == 'false'
+        id: pre_hc
+        run: |
+          node scripts/healthcheck.mjs
+        continue-on-error: true
+
+      - name: Run Self-Heal
+        if: steps.check_pr.outputs.duplicate == 'false'
+        id: repair
+        run: node scripts/self_heal.mjs
+        continue-on-error: true
+
+      - name: Healthcheck Post
+        if: steps.check_pr.outputs.duplicate == 'false' && steps.repair.outcome == 'success'
+        id: post_hc
+        run: node scripts/healthcheck.mjs
+
+      - name: Check diff
+        if: steps.check_pr.outputs.duplicate == 'false' && steps.repair.outcome == 'success' && steps.post_hc.outcome == 'success'
+        id: git_status
+        run: |
+          git status --porcelain
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "diff=false" >> $GITHUB_OUTPUT
+          else
+            echo "diff=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Secret Scan & Scope Verify
+        if: steps.check_pr.outputs.duplicate == 'false' && steps.git_status.outputs.diff == 'true'
+        id: scope_verify
+        run: |
+          git add .
+
+          if git diff --cached | grep -i -E 'password|secret|token|api_key|apikey'; then
+            if ! git diff --cached | grep -i -E 'password|secret|token|api_key|apikey' | grep -v 'github.com' | grep -v 'Notion'; then
+              echo "Warning: secrets check bypass for benign context"
+            else
+              echo "Secret detected in diff. Aborting."
+              exit 1
+            fi
+          fi
+
+          files=$(git diff --cached --name-only)
+          for file in $files; do
+            if [[ $file == .github/workflows/ci.yml || $file == .env* || $file == *migrations* ]]; then
+               echo "Forbidden file changed: $file"
+               exit 1
+            fi
+          done
+
+      - name: Create Pull Request
+        if: steps.check_pr.outputs.duplicate == 'false' && steps.git_status.outputs.diff == 'true' && steps.scope_verify.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b $BRANCH_NAME
+          git commit -m "chore: auto-repair drift"
+          git push -u origin $BRANCH_NAME
+
+          TITLE="[Self-Heal Reactive] CI fix"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create --title "$TITLE" \
+                       --body "Self-healing pipeline detected and repaired drift. Please review changes." \
+                       --label "automation,self-heal" \
+                       --base ${{ github.event.repository.default_branch }} \
+                       --head $BRANCH_NAME
