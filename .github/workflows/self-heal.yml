@@ -1,0 +1,102 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      ) &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: npm ci
+      - name: Pre-healthcheck
+        id: pre
+        run: node scripts/healthcheck.mjs
+        continue-on-error: true
+      - name: Close stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          THIRTY_DAYS_AGO=$(date -d "30 days ago" -I)
+          prs=$(gh pr list --label self-heal --state open --search "created:<$THIRTY_DAYS_AGO" --json number --jq '.[].number') || true
+          for pr in $prs; do gh pr close $pr -c "Auto-closing stale PR older than 30 days" || true; done
+      - name: Duplicate PR Check
+        id: dupcheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SEVEN_DAYS_AGO=$(date -d "7 days ago" -I)
+          prs=$(gh pr list --label self-heal --state open --search "created:>$SEVEN_DAYS_AGO" --json number --jq '.[].number') || true
+          if [ -n "$prs" ]; then echo "Open self-heal PR exists, aborting."; exit 1; fi
+      - name: Repair Pipeline
+        id: repair
+        run: node scripts/self_heal.mjs
+        continue-on-error: true
+      - name: Post-healthcheck
+        id: post
+        run: node scripts/healthcheck.mjs
+      - name: Check Diff & Boundaries
+        id: diffcheck
+        run: |
+          git add .
+          git diff --cached --name-only > changes.txt
+          if [ ! -s changes.txt ]; then exit 0; fi
+          while IFS= read -r file; do
+            if [[ "$file" == .github/workflows/ci.yml ]] || [[ "$file" == *.env* ]] || [[ "$file" == secrets/* ]]; then
+               echo "Forbidden file changed: $file" && exit 1
+            fi
+            if [[ "$file" != src/* ]] && [[ "$file" != scripts/* ]] && [[ "$file" != package* ]] && [[ "$file" != eslint* ]] && [[ "$file" != .github/workflows/self-heal.yml ]] && [[ "$file" != .github/self-heal-schedule.yml ]] && [[ "$file" != SELF_HEAL_SETUP.md ]]; then
+               echo "File not in allowlist: $file" && exit 1
+            fi
+          done < changes.txt
+          git diff --cached -S 'secret' && exit 1 || true
+          git diff --cached -S 'password' && exit 1 || true
+          git diff --cached -S 'token' && exit 1 || true
+          git diff --cached -S 'api_key' && exit 1 || true
+          echo "has_diff=true" >> $GITHUB_OUTPUT
+      - name: Create PR
+        if: steps.post.outcome == 'success' && steps.diffcheck.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+          git checkout -b selfheal-$(date +%s)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: self-heal drift fixes"
+          git push origin HEAD
+          gh pr create --title "$TITLE" --body "Self-Heal triggered to fix drift. See chat logs for context." --label "automation" --label "self-heal"
