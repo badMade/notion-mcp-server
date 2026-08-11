@@ -11,9 +11,13 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
+    if: secrets.ANTIGRAVITY_API_KEY != ''
     steps:
       - uses: actions/checkout@v4
       
-      - uses: badMade/agy-pr-review@v1
+      - uses: badMade/agy-pr-review@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          api-key: ${{ secrets.ANTIGRAVITY_API_KEY }}
+        env:
+          ANTIGRAVITY_API_KEY: ${{ secrets.ANTIGRAVITY_API_KEY }}
