@@ -1,0 +1,4 @@
+SELFHEAL_SCHEDULE: '0 0 * * 1' # AUTO-UPDATED
+tier: 'dormant'
+rationale: 'Initial bootstrap configuration, computed based on PR velocity tier: dormant (prCount: 0)'
+last_updated: '2025-03-05T00:00:00.000Z'
