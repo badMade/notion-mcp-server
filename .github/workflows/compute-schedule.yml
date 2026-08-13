@@ -1,0 +1,74 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    if: "!startsWith(github.ref_name, 'selfheal-')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Verify no open duplicate PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json createdAt -q 'length' || echo 0)
+          if [ "$OPEN_PRS" -gt 0 ]; then
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "duplicate=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run compute schedule
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm ci || npm install
+          chmod +x scripts/compute_schedule.mjs
+          ./scripts/compute_schedule.mjs
+
+      - name: Check diff
+        id: diff
+        if: steps.check_pr.outputs.duplicate != 'true'
+        run: |
+          git add .
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "diff=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR
+        if: steps.diff.outputs.diff == 'true' && steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git commit -m "Update self-heal schedule"
+          git push origin "$BRANCH_NAME"
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Updated schedule based on recent PR telemetry." \
+            --label "automation,self-heal-schedule" \
+            --head "$BRANCH_NAME"
