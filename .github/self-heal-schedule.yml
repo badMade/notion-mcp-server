@@ -1,0 +1,4 @@
+schedule: '0 3 * * *'
+rationale: Initial fallback schedule.
+last_updated: "2023-10-01T00:00:00Z"
+# AUTO-UPDATED
