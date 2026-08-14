@@ -1,0 +1,39 @@
+name: Compute Self-Heal Schedule
+on:
+  schedule: [{cron: '0 0 * * 0'}]
+  workflow_dispatch:
+permissions: { contents: write, pull-requests: write, actions: read }
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      - name: Dup PR Check
+        id: dup
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            count=$(gh pr list --label self-heal-schedule --state open --json number | jq length)
+            echo "count=$count" >> $GITHUB_OUTPUT
+          else
+            echo "count=0" >> $GITHUB_OUTPUT
+          fi
+      - env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        if: steps.dup.outputs.count == '0' || steps.dup.outputs.count == ''
+        run: node scripts/compute_schedule.mjs
+      - env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        if: steps.dup.outputs.count == '0' || steps.dup.outputs.count == ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            branch="selfheal-schedule-$(date +%s)"
+            git checkout -b $branch
+            git add .
+            git commit -m "chore: update self-heal schedule"
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated schedule update." --label "self-heal-schedule" --head $branch
+          fi
