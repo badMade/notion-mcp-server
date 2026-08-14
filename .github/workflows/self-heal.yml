@@ -75,6 +75,7 @@ jobs:
           git add .
 
           # Verify files
+          if git diff --cached --name-only | grep -vE '^src/|^tests/snapshots/|^package(-lock)?\.json$|^eslint\.config\.mjs$|^\.github/workflows/self-heal\.yml$|^\.github/self-heal-schedule\.yml$|^scripts/|^\.github/workflows/compute-schedule\.yml$|^SELF_HEAL_SETUP\.md$'; then exit 1; fi
           if git diff --cached --name-only | grep -qE '^\.github/workflows/ci\.yml$|^\.env|secrets/|migrations/'; then exit 1; fi
           git diff --cached | grep -iE 'api[_-]?key|secret|token|password' > /dev/null 2>&1 && exit 1 || true
 
