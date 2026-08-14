@@ -92,6 +92,6 @@ jobs:
             Trigger reason: ${{ github.event_name }}
             Schedule rationale: Auto-computed by self-heal
             Drift summary: Automated fixes applied to drift/CI failures.
-            Link: Link back to Claude Code / Jules chat
+            Link: See PR generation context from chat.
             " --label "automation,self-heal" --head $branch
           fi

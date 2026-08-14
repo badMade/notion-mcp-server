@@ -14,9 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - uses: badMade/agy-pr-review@main
-        env:
-          ANTIGRAVITY_API_KEY: ${{ secrets.ANTIGRAVITY_API_KEY }}
+      - uses: badMade/agy-pr-review@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          api-key: ${{ secrets.ANTIGRAVITY_API_KEY }}
