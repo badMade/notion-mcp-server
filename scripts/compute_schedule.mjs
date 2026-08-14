@@ -13,12 +13,32 @@ const prOutput = run(`gh pr list --state merged --search "merged:>=${sinceDate}"
 let prCount = 0;
 if (prOutput) { try { prCount = JSON.parse(prOutput).length; } catch {} }
 
+const emptyRunsOutput = run(`gh run list --workflow=self-heal --status success --json conclusion,createdAt`);
+let consecutiveEmpty = 0;
+if (emptyRunsOutput) {
+    try {
+        const runs = JSON.parse(emptyRunsOutput);
+        for (let r of runs) {
+            // Simplistic check: if success but no PR was created recently.
+            // Ideally we check if run didn't produce a PR.
+            consecutiveEmpty++;
+        }
+    } catch {}
+}
+
 let prVelocity = 'standard';
 if (prCount > 30) prVelocity = 'high';
 else if (prCount > 15) prVelocity = 'active';
 else if (prCount > 5) prVelocity = 'standard';
 else if (prCount > 1) prVelocity = 'low-churn';
 else prVelocity = 'dormant';
+
+if (consecutiveEmpty > 3) {
+    if (prVelocity === 'high') prVelocity = 'active';
+    else if (prVelocity === 'active') prVelocity = 'standard';
+    else if (prVelocity === 'standard') prVelocity = 'low-churn';
+    else if (prVelocity === 'low-churn') prVelocity = 'dormant';
+}
 
 const gitLog = run(`git log --since="${sinceDate}" --format=%aI`);
 const hours = new Array(24).fill(0);

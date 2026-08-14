@@ -53,19 +53,19 @@ jobs:
           fi
       - name: Pre-healthcheck
         id: pre
-        run: node scripts/healthcheck.mjs > pre-healthcheck.log 2>&1 || echo "failed=true" >> $GITHUB_OUTPUT
+        run: node scripts/healthcheck.mjs > /tmp/pre-healthcheck.log 2>&1 || echo "failed=true" >> $GITHUB_OUTPUT
         continue-on-error: true
       - name: Auto-repair
         id: repair
         if: steps.dup.outputs.count == '0' || steps.dup.outputs.count == ''
-        run: node scripts/self_heal.mjs > repair.log 2>&1
+        run: node scripts/self_heal.mjs > /tmp/repair.log 2>&1
         continue-on-error: true
       - uses: actions/upload-artifact@v4
         with:
           name: self-heal-logs
           path: |
-            pre-healthcheck.log
-            repair.log
+            /tmp/pre-healthcheck.log
+            /tmp/repair.log
       - name: Create PR
         if: steps.repair.outcome == 'success' && (steps.dup.outputs.count == '0' || steps.dup.outputs.count == '')
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
@@ -87,5 +87,10 @@ jobs:
             if [ "${{ github.event_name }}" == "schedule" ]; then TITLE="[Self-Heal Scheduled] Drift fixes"; fi
             if [ "${{ github.event_name }}" == "workflow_run" ]; then TITLE="[Self-Heal Reactive] CI fix"; fi
 
-            gh pr create --title "$TITLE" --body "Automated repair by self-heal pipeline. Logs: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --label "automation,self-heal" --head $branch
+            gh pr create --title "$TITLE" --body "Automated repair by self-heal pipeline. Logs: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+            Trigger reason: ${{ github.event_name }}
+            Schedule rationale: Auto-computed by self-heal
+            Drift summary: Automated fixes applied to drift/CI failures.
+            Link: Link back to Claude Code / Jules chat
+            " --label "automation,self-heal" --head $branch
           fi
