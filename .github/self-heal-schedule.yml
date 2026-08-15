@@ -1,0 +1,4 @@
+# Initial bootstrap schedule computed from default fallback
+schedule: "0 2 * * *" # AUTO-UPDATED
+rationale: "Default off-peak schedule (2 AM daily) due to lack of PR history."
+last_updated: "2024-01-01T00:00:00Z"

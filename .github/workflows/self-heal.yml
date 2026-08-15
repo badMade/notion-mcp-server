@@ -1,0 +1,114 @@
+name: "Self-Heal Repair"
+on:
+  schedule:
+    - cron: "0 2 * * *" # AUTO-UPDATED
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci", "pr-review"]
+    types: [completed]
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  repair:
+    if: >
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      ) &&
+      !startsWith(github.ref_name, 'selfheal-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Configure Git Author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Close stale PRs
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STALE_DATE=$(date -d "7 days ago" --iso-8601=seconds)
+          gh pr list --label self-heal --state open --json number,createdAt -q ".[] | select(.createdAt < \"$STALE_DATE\") | .number" | while read -r pr; do
+            gh pr close $pr -c "Auto-closing stale self-heal PR."
+          done
+      - name: Run pre-repair healthcheck
+        id: pre_healthcheck
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+        continue-on-error: true
+      - name: Run repair pipeline
+        id: repair
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+        continue-on-error: true
+      - name: Run post-repair healthcheck
+        id: post_healthcheck
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
+      - name: Check for drift
+        id: drift
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_drift=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_drift=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Open PR
+        if: steps.post_healthcheck.outcome == 'success' && steps.drift.outputs.has_drift == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add .
+
+          # Security constraints
+          if git diff --cached | grep -iE 'secret|token|api_key|password'; then echo "Secrets found!" && exit 1; fi
+
+          # Allowed paths
+          UNALLOWED_FILES=$(git diff --cached --name-only | grep -vE '^(src/|scripts/|tests/|\.github/|package\.json|package-lock\.json|eslint\.config\.mjs|tsconfig\.json|SELF_HEAL_SETUP\.md)')
+          if [ -n "$UNALLOWED_FILES" ]; then echo "Files outside allowlist changed: $UNALLOWED_FILES" && exit 1; fi
+
+          # Denied paths
+          DENIED_FILES=$(git diff --cached --name-only | grep -E '^(\.github/workflows/ci\.yml|\.env|secrets/)')
+          if [ -n "$DENIED_FILES" ]; then echo "Files in denylist changed: $DENIED_FILES" && exit 1; fi
+
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH"
+          git commit -m "Auto-repair drift and CI failures"
+          git push origin "$BRANCH"
+
+          TITLE="[Self-Heal] Repair"
+          if [ "${{ github.event_name }}" == "schedule" ]; then TITLE="[Self-Heal Scheduled] Drift fixes"; fi
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then TITLE="[Self-Heal Reactive] CI fix"; fi
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then TITLE="[Self-Heal Manual] Repair"; fi
+
+          CURRENT_SCHEDULE=$(node --input-type=module -e "import fs from 'fs'; import yaml from 'js-yaml'; const y = yaml.load(fs.readFileSync('.github/self-heal-schedule.yml', 'utf8')); console.log(y.schedule);")
+          CURRENT_RATIONALE=$(node --input-type=module -e "import fs from 'fs'; import yaml from 'js-yaml'; const y = yaml.load(fs.readFileSync('.github/self-heal-schedule.yml', 'utf8')); console.log(y.rationale);")
+
+          # Duplicate PR guard
+          OPEN_PRS=$(gh pr list --label "self-heal" --state open --json number -q 'length')
+          if [ "$OPEN_PRS" -eq 0 ]; then
+            gh pr create --title "$TITLE" --body "Automated self-heal repair.\n\nTrigger: ${{ github.event_name }}\n\nLogs are available in the Actions artifacts: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\nCurrent Schedule: $CURRENT_SCHEDULE\nRationale: $CURRENT_RATIONALE\n\nDrift Summary:\n\`\`\`\n$(git diff --stat)\n\`\`\`" --label "self-heal" --label "automation"
+          fi
