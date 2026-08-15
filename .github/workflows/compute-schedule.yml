@@ -1,0 +1,54 @@
+name: "Self-Heal Compute Schedule"
+on:
+  schedule:
+    - cron: "0 4 * * *" # Daily adaptive schedule fallback
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Configure Git Author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Compute new schedule
+        id: compute
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+      - name: Check for drift
+        id: drift
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_drift=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_drift=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Open PR
+        if: steps.drift.outputs.has_drift == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="selfheal-schedule-$(date +%s)"
+          git checkout -b "$BRANCH"
+          git add .
+          git commit -m "Auto-update self-heal schedule"
+          git push origin "$BRANCH"
+
+          OPEN_PRS=$(gh pr list --label "self-heal-schedule" --state open --json number -q 'length')
+          if [ "$OPEN_PRS" -eq 0 ]; then
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated update to self-heal schedule based on PR/commit telemetry.\nLogs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --label "self-heal-schedule" --label "automation"
+          fi
