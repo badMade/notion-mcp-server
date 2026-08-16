@@ -1,0 +1,31 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      - run: node scripts/compute_schedule.mjs
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH="schedule-$(date +%s)"
+            git checkout -b $BRANCH
+            git add .
+            git commit -m "Update self-heal schedule"
+            git push origin $BRANCH
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Schedule updated via telemetry." --label "self-heal-schedule"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
