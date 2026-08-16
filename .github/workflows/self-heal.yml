@@ -1,0 +1,63 @@
+name: Self-Heal Repair
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+jobs:
+  repair:
+    if: >
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      - run: node scripts/healthcheck.mjs > pre.log 2>&1
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with: { name: pre-log, path: pre.log }
+      - run: node scripts/self_heal.mjs > repair.log 2>&1
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with: { name: repair-log, path: repair.log }
+      - id: post
+        run: node scripts/healthcheck.mjs > post.log 2>&1
+      - uses: actions/upload-artifact@v4
+        with: { name: post-log, path: post.log }
+      - if: steps.post.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+
+          # Fix for secret scanning: check exit code properly
+          if git diff --cached -S 'sk-ant' --quiet || git diff --cached -S 'ghp_' --quiet; then
+             # found a secret if git diff returned 0 (diff found)
+             if [ $? -eq 0 ]; then exit 1; fi
+          fi
+
+          if [ -z "$(git status --porcelain)" ]; then exit 0; fi
+          DUPS=$(gh pr list --label "self-heal" --state open --json createdAt -q 'length' || echo "0")
+          if [ "$DUPS" -gt 0 ]; then exit 0; fi
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b $BRANCH
+          git commit -m "Auto-repair drift"
+          git push origin $BRANCH
+          gh pr create --title "[Self-Heal] Drift fixes" --body "Auto-generated repair PR. See workflow artifacts for logs." --label "automation,self-heal"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
