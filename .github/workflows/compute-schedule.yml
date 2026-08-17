@@ -1,0 +1,70 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: compute-schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    if: github.ref_name == 'main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install JS-YAML
+        run: npm install js-yaml@4
+
+      - name: Run Compute Schedule
+        id: compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "Self Heal Bot"
+          git config user.email "bot@example.com"
+          node scripts/compute_schedule.mjs > compute.log 2>&1
+
+      - name: Update Workflow Schedule
+        if: steps.compute.outputs.changed == 'true'
+        run: |
+          NEW_SCHED="${{ steps.compute.outputs.schedule }}"
+          sed -i "s|cron:.*# AUTO-UPDATED|cron: \"$NEW_SCHED\" # AUTO-UPDATED|" .github/workflows/self-heal.yml
+
+      - name: Create PR
+        if: steps.compute.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then exit 0; fi
+          count=$(gh pr list --label self-heal-schedule --state open --json number -q 'length' || echo "0")
+          if [ "$count" -gt 0 ]; then
+            echo "Found open schedule PR. Aborting."
+            exit 0
+          fi
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Update self-heal schedule"
+
+          BRANCH="schedule-update-$(date +%s)"
+          git checkout -b $BRANCH
+          git push -u origin $BRANCH
+
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated self-healing schedule update based on recent PR telemetry." --label "automation,self-heal-schedule"
