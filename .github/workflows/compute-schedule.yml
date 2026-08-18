@@ -1,0 +1,55 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install js-yaml
+        run: npm install js-yaml@4
+
+      - name: Configure Git Author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute New Schedule
+        id: compute
+        run: node scripts/compute_schedule.mjs
+
+      - name: Create PR
+        if: steps.compute.outputs.schedule_changed == 'true'
+        run: |
+          OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json number -q '.[].number')
+          if [ ! -z "$OPEN_PRS" ]; then
+            echo "Open schedule update PR already exists. Avoiding oscillation/thrash. Exiting."
+            exit 0
+          fi
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+          git commit -m "Update self-heal schedule to ${{ steps.compute.outputs.new_schedule }}"
+          BRANCH="schedule-update-$(date +%s)"
+          git checkout -b $BRANCH
+          git push origin $BRANCH
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Updating cadence to ${{ steps.compute.outputs.new_schedule }}" --label "self-heal-schedule,automation" --base main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
