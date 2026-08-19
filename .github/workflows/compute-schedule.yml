@@ -1,0 +1,82 @@
+name: Compute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Compute Schedule
+        id: compute
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm ci
+          node scripts/compute_schedule.mjs
+
+      - name: Extract YAML Schedule
+        if: always()
+        id: extract
+        run: |
+          node scripts/extract_schedule.mjs
+
+      - name: Update workflows
+        if: always()
+        run: |
+          new_schedule="${{ steps.extract.outputs.new_schedule }}"
+          sed -i "s|cron: '.*' # AUTO-UPDATED|cron: '$new_schedule' # AUTO-UPDATED|" .github/workflows/self-heal.yml
+
+      - name: Check Diff
+        id: check_diff
+        if: always()
+        run: |
+          git add .github/
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check Duplicate PR
+        if: always() && steps.check_diff.outputs.has_diff == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal-schedule --state open --json number | jq length)
+          if [ "$count" -gt "0" ]; then
+            echo "Duplicate PR exists for schedule update!"
+            exit 1
+          fi
+
+      - name: Configure Git
+        if: always() && steps.check_diff.outputs.has_diff == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create PR
+        if: always() && steps.check_diff.outputs.has_diff == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch_name="selfheal-schedule-$(date +%s)"
+          git checkout -b $branch_name
+          git commit -m "Update self-heal schedule"
+          git push origin $branch_name
+          gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Automated PR to update the self-heal schedule based on telemetry." --label "self-heal-schedule"
