@@ -1,0 +1,141 @@
+name: Self-Heal Repair Pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    conclusion:
+      - failure
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    if: "((github.event_name == 'schedule') || (github.event_name == 'workflow_run') || (github.event_name == 'workflow_dispatch')) && !startsWith(github.ref_name, 'selfheal-')"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stale PR Cleanup
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/cleanup_stale_prs.mjs
+
+      - name: Pre-healthcheck
+        id: pre
+        run: |
+          node scripts/healthcheck.mjs > pre-healthcheck.log 2>&1 || true
+          echo "exit_code=$?" >> $GITHUB_ENV
+        continue-on-error: true
+
+      - name: Run Repair Pipeline
+        id: repair_script
+        run: |
+          node scripts/self_heal.mjs > repair.log 2>&1
+        continue-on-error: true
+
+      - name: Post-healthcheck
+        id: post
+        if: always()
+        run: |
+          node scripts/healthcheck.mjs > post-healthcheck.log 2>&1
+        continue-on-error: true
+
+      - name: Check Diff & Boundaries
+        id: diff_check
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          git add .
+
+          if git diff --cached | grep -qE '(?i)(secret|password|token|api_key|apikey)'; then
+            echo "Secrets found in diff!"
+            exit 1
+          fi
+
+          if git diff --cached --name-only | grep -qE '^\.github/workflows/ci\.yml|^secrets/|\.env$'; then
+            echo "Modifications outside allowed boundaries (denylist)!"
+            exit 1
+          fi
+
+          if git diff --cached --name-only | grep -vE '^(src/|tests/|package\.json|package-lock\.json|eslint\.config\.mjs|scripts/|\.github/)'; then
+            echo "Modifications outside allowed boundaries (allowlist)!"
+            exit 1
+          fi
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-healthcheck.log
+            repair.log
+            post-healthcheck.log
+
+      - name: Check Duplicate PR
+        if: always() && steps.diff_check.outputs.has_diff == 'true'
+        id: dup_check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal --state open --json number | jq length)
+          if [ "$count" -gt "0" ]; then
+            echo "Duplicate PR exists!"
+            exit 1
+          fi
+
+      - name: Configure Git
+        if: always() && steps.diff_check.outputs.has_diff == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create PR
+        if: always() && steps.diff_check.outputs.has_diff == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch_name="selfheal-$(date +%s)"
+          git checkout -b $branch_name
+          git commit -m "Auto-repair codebase"
+          git push origin $branch_name
+
+          trigger_reason="${{ github.event_name }}"
+          title="[Self-Heal] Repair codebase"
+          if [ "$trigger_reason" == "schedule" ]; then
+            title="[Self-Heal Scheduled] Drift fixes"
+          elif [ "$trigger_reason" == "workflow_run" ]; then
+            title="[Self-Heal Reactive] CI fix"
+          elif [ "$trigger_reason" == "workflow_dispatch" ]; then
+            title="[Self-Heal Manual] Repair"
+          fi
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh pr create --title "$title" --body "Self-Heal Repair Pipeline ran due to $trigger_reason. See artifact logs in workflow run: $run_url" --label "self-heal"
