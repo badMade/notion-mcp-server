@@ -1,0 +1,124 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: |
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      ) && !startsWith(github.ref_name, 'selfheal-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Close stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --label self-heal --state open --json number,createdAt | jq -r '.[] | select((now - (.createdAt | fromdateiso8601)) > 604800) | .number' | xargs -I {} gh pr close {} --comment "Auto-closing stale self-heal PR." || true
+
+      - name: Check for duplicate active PRs
+        id: check_dup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$(gh pr list --label self-heal --state open --json number | jq length)" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pre-healthcheck
+        id: pre
+        if: steps.check_dup.outputs.duplicate != 'true'
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs > pre-healthcheck.log 2>&1
+
+      - name: Repair
+        id: repair
+        if: steps.check_dup.outputs.duplicate != 'true'
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-healthcheck
+        id: post
+        if: always() && steps.check_dup.outputs.duplicate != 'true'
+        run: node scripts/healthcheck.mjs > post-healthcheck.log 2>&1
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfheal-logs
+          path: |
+            pre-healthcheck.log
+            repair.log
+            post-healthcheck.log
+
+      - name: Check Diff & Boundaries
+        id: diff
+        if: always() && steps.check_dup.outputs.duplicate != 'true' && steps.post.outcome == 'success'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            if git diff --cached --name-only | grep -qE '^(\.github/workflows/ci\.yml|\.env|secrets/|src/.*/migrations/)'; then
+               echo "Out of bounds change detected"
+               echo "has_diff=false" >> $GITHUB_OUTPUT
+            elif git diff --cached | grep -qiE '(api_key|token|secret)'; then
+               echo "Potential secret in diff"
+               echo "has_diff=false" >> $GITHUB_OUTPUT
+            else
+               echo "has_diff=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: always() && steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b "$BRANCH"
+          git commit -m "Auto-repair drift/CI failure"
+          git push origin "$BRANCH"
+
+          TITLE="[Self-Heal Manual] Repair"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          fi
+
+          gh pr create --title "$TITLE" --body "Self-healing auto-repair. Review the workflow artifact logs for details. https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" --label "automation,self-heal" --head "$BRANCH"
