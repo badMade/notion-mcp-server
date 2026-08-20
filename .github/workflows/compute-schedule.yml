@@ -1,0 +1,58 @@
+name: Compute Schedule
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: schedule-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Install dependencies
+        run: npm ci
+      - name: Check for duplicate schedule PRs
+        id: check_dup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$(gh pr list --label self-heal-schedule --state open --json number | jq length)" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Compute
+        if: steps.check_dup.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+      - name: PR if changed
+        if: steps.check_dup.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH="schedule-update-$(date +%s)"
+            git checkout -b "$BRANCH"
+            git add .
+            git commit -m "Update self-heal schedule"
+            git push origin "$BRANCH"
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Telemetry-based schedule adjustment. Link: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" --label "automation,self-heal-schedule" --head "$BRANCH"
+          fi
