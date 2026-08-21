@@ -1,0 +1,70 @@
+name: Recompute Self-Heal Schedule
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # Weekly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Git setup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for open schedule PRs
+        id: dupe
+        run: |
+          if gh pr list --label self-heal-schedule --state open --json createdAt --jq 'length' | grep -q '^[1-9]'; then
+            echo "duplicate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "duplicate=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute new schedule
+        if: steps.dupe.outputs.duplicate != 'true'
+        run: ./scripts/compute_schedule.mjs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update main workflow
+        if: steps.dupe.outputs.duplicate != 'true'
+        run: |
+          NEW_SCHEDULE=$(grep -oP '(?<=schedule: ")[^"]+' .github/self-heal-schedule.yml || true)
+          if [ -n "$NEW_SCHEDULE" ]; then
+            sed -i "s/cron:.*# AUTO-UPDATED/cron: '$NEW_SCHEDULE' # AUTO-UPDATED/" .github/workflows/self-heal.yml
+          fi
+
+      - name: Create PR
+        if: steps.dupe.outputs.duplicate != 'true'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH_NAME="selfheal-schedule-$(date +%s)"
+            git checkout -b "$BRANCH_NAME"
+            git add .
+            git commit -m "Update self-heal schedule"
+            git push origin "$BRANCH_NAME"
+            gh pr create --title "[Self-Heal Schedule] Update cadence" \
+              --body "Automated schedule adjustment based on recent telemetry." \
+              --label "automation" --label "self-heal-schedule"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
