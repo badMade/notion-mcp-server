@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { HttpClient } from '../http-client'
 import type express from 'express'
-//@ts-ignore
+//@ts-expect-error - no types for petstore-server.cjs
 import { createPetstoreServer } from '../../../examples/petstore-server.cjs'
 import type { OpenAPIV3 } from 'openapi-types'
 import axios from 'axios'
@@ -42,7 +42,7 @@ describe('HttpClient Integration Tests', () => {
   })
 
   afterAll(() => {
-    //@ts-expect-error
+    //@ts-expect-error - mock server type lacks close method but has it at runtime
     server.close()
   })
 

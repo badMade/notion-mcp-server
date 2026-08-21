@@ -34,7 +34,7 @@ export class HttpClient {
   private client: OpenAPIClientAxios
 
   constructor(config: HttpClientConfig, openApiSpec: OpenAPIV3.Document | OpenAPIV3_1.Document) {
-    // @ts-expect-error
+    // @ts-expect-error - default export compatibility workaround
     this.client = new (OpenAPIClientAxios.default ?? OpenAPIClientAxios)({
       definition: openApiSpec,
       axiosConfigDefaults: {
@@ -83,7 +83,7 @@ export class HttpClient {
             const fileStream = fs.createReadStream(filePath)
             formData.append(name, fileStream)
         } catch (error) {
-          throw new Error(`Failed to read file at ${filePath}: ${error}`)
+          throw new Error(`Failed to read file at ${filePath}: ${error}`, { cause: error })
         }
       }
     }
