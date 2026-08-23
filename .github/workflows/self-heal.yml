@@ -1,0 +1,124 @@
+name: Self-Heal Repair
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: |
+      (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')
+      ) &&
+      github.ref_name == github.event.repository.default_branch &&
+      !startsWith(github.ref_name, 'selfheal-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Auto-close stale PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --label self-heal --state open --json number,createdAt -q '.[] | select(.createdAt < (now - 604800 | todate)) | .number' | xargs -I {} gh pr close {} --comment "Auto-closing stale self-heal PR" || true
+
+      - name: Duplicate PR Check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh pr list --label self-heal --state open --json number -q 'length')
+          if [ "$COUNT" -gt 0 ]; then
+            echo "Open self-heal PR exists. Exiting to avoid duplicate."
+            exit 0
+          fi
+
+      - name: Git Config
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Pre-healthcheck
+        id: pre_healthcheck
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+
+      - name: Run Repair Script
+        id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-healthcheck
+        id: post_healthcheck
+        if: always()
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Evaluate Gates and PR creation
+        if: always() && steps.post_healthcheck.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$(git status --porcelain | grep -v '\.log$')" ]; then
+            if git diff --cached | grep -qE 'API_KEY|TOKEN|SECRET'; then
+              echo "Secrets found in diff! Aborting."
+              exit 1
+            fi
+
+            git diff --name-only > changed_files.txt
+            if grep -qE '\.github/workflows/ci\.yml|\.env|secrets/' changed_files.txt; then
+              echo "Changes to forbidden files found! Aborting."
+              exit 1
+            fi
+
+            if [ "${{ steps.pre_healthcheck.outcome }}" == "success" ]; then
+              if ! git diff -U0 | grep '^[+-]' | grep -Ev '^[+-]\s*$' | grep -qv '^[+-]\{3\}'; then
+                echo "Diff is whitespace-only. Aborting."
+                exit 0
+              fi
+            fi
+
+            BRANCH="selfheal-repair-$(date +%s)"
+            git checkout -b $BRANCH
+            git add .
+            git reset -- *.log
+            git commit -m "Auto-repair drift and format issues"
+            git push origin $BRANCH
+
+            TITLE="[Self-Heal Manual] Repair"
+            if [ "${{ github.event_name }}" == "schedule" ]; then TITLE="[Self-Heal Scheduled] Drift fixes"; fi
+            if [ "${{ github.event_name }}" == "workflow_run" ]; then TITLE="[Self-Heal Reactive] CI fix"; fi
+
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+            gh pr create --title "$TITLE" --body "Self-healing repair triggered by ${{ github.event_name }}. Drift fixed. Artifact logs available at: $RUN_URL" --label "automation,self-heal"
+          fi
+
+      - name: Upload Artifact Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
