@@ -62,39 +62,25 @@ if (prVelocity > 50) {
 const selfHealYamlPath = path.join(process.cwd(), '.github', 'workflows', 'self-heal.yml');
 const selfHealSchedulePath = path.join(process.cwd(), '.github', 'self-heal-schedule.yml');
 
-let currentSchedule = '';
-if (fs.existsSync(selfHealSchedulePath)) {
-  try {
-    const existingData = yaml.load(fs.readFileSync(selfHealSchedulePath, 'utf8'));
-    currentSchedule = existingData.schedule;
-  } catch (e) {}
+const scheduleData = {
+  schedule: cronSchedule,
+  rationale: rationale,
+  last_updated: new Date().toISOString()
+};
+
+fs.writeFileSync(selfHealSchedulePath, yaml.dump(scheduleData));
+
+if (fs.existsSync(selfHealYamlPath)) {
+  const workflowContent = fs.readFileSync(selfHealYamlPath, 'utf8');
+  const doc = yaml.load(workflowContent);
+  if (doc && doc.on && doc.on.schedule && doc.on.schedule[0]) {
+    doc.on.schedule[0].cron = cronSchedule;
+    let newWorkflowContent = yaml.dump(doc, { lineWidth: -1 });
+    newWorkflowContent = newWorkflowContent.replace(/cron:.*$/m, `cron: '${cronSchedule}' # AUTO-UPDATED`);
+    fs.writeFileSync(selfHealYamlPath, newWorkflowContent);
+  }
 }
 
-if (currentSchedule !== cronSchedule) {
-  const scheduleData = {
-    schedule: cronSchedule,
-    rationale: rationale,
-    last_updated: new Date().toISOString()
-  };
-
-  fs.writeFileSync(selfHealSchedulePath, yaml.dump(scheduleData));
-
-  if (fs.existsSync(selfHealYamlPath)) {
-    const workflowContent = fs.readFileSync(selfHealYamlPath, 'utf8');
-    const doc = yaml.load(workflowContent);
-    if (doc && doc.on && doc.on.schedule && doc.on.schedule[0]) {
-      doc.on.schedule[0].cron = cronSchedule;
-      let newWorkflowContent = yaml.dump(doc, { lineWidth: -1 });
-      newWorkflowContent = newWorkflowContent.replace(/cron:.*$/m, `cron: '${cronSchedule}' # AUTO-UPDATED`);
-      fs.writeFileSync(selfHealYamlPath, newWorkflowContent);
-    }
-  }
-
-  if (process.env.GITHUB_OUTPUT) {
-    fs.appendFileSync(process.env.GITHUB_OUTPUT, `new_schedule=${cronSchedule}\n`);
-  }
-} else {
-  if (process.env.GITHUB_OUTPUT) {
-    fs.appendFileSync(process.env.GITHUB_OUTPUT, `new_schedule=unchanged\n`);
-  }
+if (process.env.GITHUB_OUTPUT) {
+  fs.appendFileSync(process.env.GITHUB_OUTPUT, `new_schedule=${cronSchedule}\n`);
 }
