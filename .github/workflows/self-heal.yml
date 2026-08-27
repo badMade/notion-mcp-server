@@ -1,0 +1,118 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: '0 0 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/main' && !startsWith(github.ref_name, 'selfheal-') && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Close Stale PRs
+        run: |
+          # Auto-close stale selfheal PRs older than 7 days
+          threshold=$(date -d "7 days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
+          gh pr list --label self-heal --state open --json number,createdAt -q ".[] | select(.createdAt < \"$threshold\") | .number" | xargs -I {} gh pr close {} -c "Auto-closing stale self-heal PR"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for duplicate PRs
+        run: |
+          count=$(gh pr list --label self-heal --state open --json createdAt -q 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "Duplicate PR exists, exiting."
+            exit 0
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pre-healthcheck
+        id: pre
+        run: node scripts/healthcheck.mjs > pre-healthcheck.log 2>&1
+        continue-on-error: true
+
+      - name: Repair
+        id: repair
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+        continue-on-error: true
+
+      - name: Post-healthcheck
+        id: post
+        if: always() && steps.repair.outcome == 'success'
+        run: node scripts/healthcheck.mjs > post-healthcheck.log 2>&1
+        continue-on-error: true
+
+      - name: Check Diff & Gate
+        id: gate
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          # explicitly stage only allowed files
+          git add src/ package.json package-lock.json eslint.config.mjs tsconfig.json scripts/ || true
+
+          if [ -z "$(git status --porcelain | grep -v '\.log$')" ]; then
+            echo "No changes to commit."
+            exit 1
+          fi
+
+          if git diff --cached | grep -qi 'secret\|api_key\|token\|password'; then
+            echo "Secrets detected in diff, rejecting."
+            exit 1
+          fi
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-logs
+          path: "*.log"
+
+      - name: Create PR
+        if: always() && steps.gate.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b selfheal-$(date +%s)
+          git commit -m "Auto-repair fix"
+
+          # Dynamic Title and Body
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            PR_TITLE="[Self-Heal Scheduled] Drift fixes"
+            REASON="Scheduled trigger"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            PR_TITLE="[Self-Heal Reactive] CI fix"
+            REASON="CI failure reactive trigger"
+          else
+            PR_TITLE="[Self-Heal Manual] Repair"
+            REASON="Manual dispatch"
+          fi
+
+          gh pr create --title "$PR_TITLE" \
+            --body "Self-heal applied.
+
+          **Trigger:** $REASON
+
+          Logs in artifacts. Check workflow run logs for more details." \
+            --label "automation,self-heal"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
