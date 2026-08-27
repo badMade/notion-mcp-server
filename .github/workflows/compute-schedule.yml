@@ -1,0 +1,48 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run Compute Schedule
+        run: |
+          npm install js-yaml
+          node scripts/compute_schedule.mjs
+      - name: Check for duplicate PRs
+        run: |
+          count=$(gh pr list --label self-heal-schedule --state open --json createdAt -q 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "Duplicate PR exists, exiting."
+            # Use a soft exit to not fail the job if it's just avoiding a duplicate, or exit 0 to skip
+            exit 0
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create PR
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git checkout -b selfheal-schedule-$(date +%s)
+            git commit -m "Update self-heal schedule"
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Schedule updated based on telemetry." --label "self-heal-schedule,automation"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
