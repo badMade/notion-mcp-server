@@ -1,0 +1,66 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Weekly on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute-schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Compute New Schedule
+        id: compute
+        run: node scripts/compute_schedule.mjs
+
+      - name: Update Workflow Schedule & Create PR
+        if: steps.compute.outputs.schedule_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check for open schedule update PRs
+          EXISTING_PRS=$(gh pr list --label "self-heal-schedule" --state open --json number | jq length)
+          if [ "$EXISTING_PRS" -gt 0 ]; then
+             echo "An open schedule update PR already exists. Skipping."
+             exit 0
+          fi
+
+          git add .github/self-heal-schedule.yml .github/workflows/self-heal.yml
+
+          # Only proceed if there are files staged
+          if [ -n "$(git status --porcelain)" ]; then
+            BRANCH_NAME="selfheal-schedule-$(date +%s)"
+            git checkout -b $BRANCH_NAME
+            git commit -m "Auto-update: Self-heal schedule cadence"
+            git push -u origin $BRANCH_NAME
+
+            gh pr create --title "[Self-Heal Schedule] Update cadence" \
+                         --body "Automated PR to update the self-heal schedule based on recent repository telemetry." \
+                         --label "automation,self-heal-schedule" \
+                         --head $BRANCH_NAME \
+                         --base main
+          else
+             echo "No changes detected after modification. Skipping PR."
+          fi
