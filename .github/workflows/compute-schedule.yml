@@ -1,0 +1,83 @@
+name: Self-Heal Compute Schedule
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Recompute schedule weekly on Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Git Author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for recent schedule PR
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          open_prs=$(gh pr list --label "self-heal-schedule" --state open --json number -q '.[].number')
+          if [ -n "$open_prs" ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Found open self-heal-schedule PR: $open_prs. Skipping."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute New Schedule
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Create PR if schedule changed
+        if: steps.check_pr.outputs.duplicate != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No schedule changes. Exiting."
+            exit 0
+          fi
+
+          TITLE="[Self-Heal Schedule] Update cadence"
+          BRANCH_NAME="selfheal-schedule-$(date +%s)"
+
+          git commit -m "$TITLE"
+          git checkout -b $BRANCH_NAME
+          git push -u origin $BRANCH_NAME
+
+          cat <<EOF > pr_body.txt
+          ## 🤖 Self-Heal Schedule Update
+
+          The self-healing telemetry pipeline has evaluated PR and git activity and computed a new optimal schedule for auto-repairs.
+
+          Please review the changes in \`.github/workflows/self-heal.yml\` and \`.github/self-heal-schedule.yml\`.
+          EOF
+
+          gh pr create --title "$TITLE" --body-file pr_body.txt --label "self-heal-schedule" --label "automation" --base main
