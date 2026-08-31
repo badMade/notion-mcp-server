@@ -1,0 +1,142 @@
+name: Self-Heal Auto-Repair
+'on':
+  schedule:
+    - cron: 0 0 * * 0 # AUTO-UPDATED
+  workflow_run:
+    workflows:
+      - ci
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch: null
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  repair:
+    if: >-
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure') || (github.event_name
+      == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Stale PR Cleanup & Duplicate Guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh pr list --label "self-heal" --state open --json number,createdAt |
+          jq -c '.[]' | while read -r pr; do
+            num=$(echo "$pr" | jq -r '.number')
+            created=$(echo "$pr" | jq -r '.createdAt')
+            age_days=$(( ($(date +%s) - $(date -d "$created" +%s)) / 86400 ))
+            if [ "$age_days" -gt 7 ]; then
+              gh pr close "$num" --comment "Auto-closing stale self-heal PR"
+            fi
+          done
+
+
+          if gh pr list --label "self-heal" --state open | grep -q "Self-Heal";
+          then
+            echo "Self-heal PR already open. Stopping."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run pre-healthcheck
+        id: pre
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+
+      - name: Run repair
+        id: repair
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Run post-healthcheck
+        id: post
+        if: always()
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: '*.log'
+      - name: Gate Check & PR Creation
+        if: always() && steps.post.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          if [ -z "$(git status --porcelain | grep -v "\.log$" || true)" ]; then
+            echo "No diff found. Exiting."
+            exit 0
+          fi
+
+
+          if [[ "${{ github.ref_name }}" == selfheal-* ]]; then
+             echo "Already on a selfheal branch."
+             exit 0
+          fi
+
+
+          git add -A
+
+
+          if git diff --cached | grep -q 'secret'; then
+            echo "Secrets detected. Aborting."
+            exit 1
+          fi
+
+
+          if git diff --cached --name-only | grep -vE
+          '^(src/|tests/|package\.json|package-lock\.json|\.github/|scripts/)';
+          then
+             echo "Changes outside allowed directories. Aborting."
+             exit 1
+          fi
+
+
+          if git diff --cached --name-only | grep -E
+          '^(\.github/workflows/ci\.yml|\.env|secrets/)'; then
+             echo "Changes in denied directories. Aborting."
+             exit 1
+          fi
+
+
+          git checkout -b selfheal-$(date +%s)
+
+          git commit -m "Auto-repair drift"
+
+
+          TRIGGER="Manual"
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+          TRIGGER="Scheduled"; fi
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+          TRIGGER="Reactive"; fi
+
+
+          gh pr create \
+            --title "[Self-Heal $TRIGGER] Drift fixes" \
+            --body "Auto-generated PR for drift repair.<br/>Trigger: $TRIGGER<br/>[Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            --label "automation,self-heal" \
+            --base main
