@@ -1,0 +1,71 @@
+name: Compute Schedule
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: compute-schedule
+  cancel-in-progress: true
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run compute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/compute_schedule.mjs
+
+      - name: Gate Check & PR Creation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$(git status --porcelain || true)" ]; then
+            echo "No schedule change. Exiting."
+            exit 0
+          fi
+
+          if gh pr list --label self-heal-schedule --state open | grep -q "Schedule"; then
+            echo "Schedule PR already open. Exiting."
+            exit 0
+          fi
+
+          git add -A
+
+          if git diff --cached --name-only | grep -vE '^(\.github/workflows/self-heal\.yml|\.github/self-heal-schedule\.yml)$'; then
+             echo "Unexpected file changes. Aborting."
+             exit 1
+          fi
+
+          git checkout -b selfheal-schedule-$(date +%s)
+          git commit -m "Update self-heal schedule"
+
+          gh pr create \
+            --title "[Self-Heal Schedule] Update cadence" \
+            --body "Auto-generated PR for schedule update." \
+            --label "automation,self-heal-schedule" \
+            --base main
