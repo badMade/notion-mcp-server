@@ -1,0 +1,122 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: "0 2 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure')) && !startsWith(github.ref_name, 'selfheal-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Auto-close stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --label self-heal --state open --json number,createdAt -q '.[] | select(.createdAt < (now - 604800 | todate)) | .number' | xargs -I {} gh pr close {} -c "Stale auto-repair PR closed." || true
+
+      - name: Duplicate PR Check
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal --state open --json createdAt -q 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "open_pr=true" >> $GITHUB_OUTPUT
+            echo "Found open selfheal PR."
+          else
+            echo "open_pr=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pre Healthcheck
+        if: steps.check_pr.outputs.open_pr == 'false'
+        id: pre
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs > pre-healthcheck.log 2>&1
+
+      - name: Self-Heal Repair
+        if: always() && steps.check_pr.outputs.open_pr == 'false'
+        id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post Healthcheck
+        if: always() && steps.check_pr.outputs.open_pr == 'false'
+        id: post
+        run: node scripts/healthcheck.mjs > post-healthcheck.log 2>&1
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre-healthcheck.log
+            repair.log
+            post-healthcheck.log
+
+      - name: Check Diff & Boundaries
+        if: always() && steps.post.outcome == 'success' && steps.check_pr.outputs.open_pr == 'false'
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain | grep -v "\.log$" || true)" ]; then
+            git add -A
+
+            if git diff --cached --name-only | grep -E '(\.github/workflows/ci\.yml|\.env|secrets/|migrations/)'; then
+              echo "Changes in forbidden files."
+              exit 1
+            fi
+
+            if git diff --cached | grep -q 'secret'; then
+              echo "Secret found in diff."
+              exit 1
+            fi
+
+            echo "has_diff=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: always() && steps.post.outcome == 'success' && steps.diff.outputs.has_diff == 'true' && steps.check_pr.outputs.open_pr == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch="selfheal-repair-$(date +%s)"
+          git checkout -b $branch
+          git commit -m "Auto-repair drift/CI failure"
+          git push origin $branch
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          else
+            TITLE="[Self-Heal Manual] Repair"
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Auto-repair changes. Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "automation,self-heal"
