@@ -1,0 +1,109 @@
+name: Self Heal
+on:
+  schedule:
+    - cron: '0 2 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: |
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm ci
+      - name: Stale PR Cleanup
+        run: |
+          gh pr list --label self-heal --state open --json number,createdAt | jq -c '.[]' | while read pr; do
+            num=$(echo $pr | jq -r .number)
+            created=$(echo $pr | jq -r .createdAt)
+            created_s=$(date -d "$created" +%s)
+            now_s=$(date +%s)
+            if [ $((now_s - created_s)) -gt 604800 ]; then
+              gh pr close $num --comment "Closing stale self-heal PR"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pre-healthcheck
+        id: pre
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+      - name: Run Repair
+        id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+      - name: Post-healthcheck
+        id: post
+        if: always()
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: "*.log"
+      - name: Check Diff & Gate
+        id: gate
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          git status --porcelain | grep -v "\.log$" > diff.txt || true
+          if [ -s diff.txt ]; then
+             echo "diff_exists=true" >> $GITHUB_OUTPUT
+             git add src/ package.json package-lock.json eslint.config.mjs scripts/
+             git diff --cached | grep -q 'secret' && exit 1 || true
+          else
+             echo "diff_exists=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create PR
+        if: always() && steps.post.outcome == 'success' && steps.gate.outcome == 'success' && steps.gate.outputs.diff_exists == 'true'
+        run: |
+          duplicate=$(gh pr list --label self-heal --state open --json number | jq '. | length')
+          if [ "$duplicate" -gt 0 ]; then
+            echo "Duplicate open PR found, skipping."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="selfheal-${{ github.run_id }}"
+          git checkout -b $BRANCH
+          git commit -m "Automated self-heal repair"
+          git push origin $BRANCH
+
+          PR_TITLE="[Self-Heal] Drift fixes"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            PR_TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            PR_TITLE="[Self-Heal Manual] Repair"
+          elif [ "${{ github.event_name }}" == "workflow_run" ]; then
+            PR_TITLE="[Self-Heal Reactive] CI fix"
+          fi
+
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          gh pr create --title "$PR_TITLE" --body "Self-healing pipeline created this PR. Check artifact logs for details. Logs: $RUN_URL" --label "automation,self-heal"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
