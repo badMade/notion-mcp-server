@@ -1,0 +1,130 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: '0 0 * * 0' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    if: >
+      github.ref == 'refs/heads/main' &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        continue-on-error: true
+        run: npm ci
+
+      - name: Auto-close stale PRs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --label self-heal --state open --json number,createdAt -q '.[] | select((now - (.createdAt | fromdateiso8601)) > 604800) | .number' | xargs -I {} gh pr close {} -c "Stale auto-repair PR closed" || true
+
+      - name: Check for Duplicate PRs
+        if: always()
+        id: check_duplicate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --label self-heal --state open --json createdAt -q 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            echo "Found duplicate open self-heal PRs."
+          else
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pre Healthcheck
+        if: always() && steps.check_duplicate.outputs.duplicate != 'true'
+        id: pre
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+
+      - name: Run Repair
+        if: always() && steps.check_duplicate.outcome == 'success' && steps.check_duplicate.outputs.duplicate != 'true'
+        id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post Healthcheck
+        if: always() && steps.check_duplicate.outcome == 'success' && steps.check_duplicate.outputs.duplicate != 'true'
+        id: post
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
+
+      - name: Evaluate Gates and Create PR
+        if: always() && steps.check_duplicate.outcome == 'success' && steps.check_duplicate.outputs.duplicate != 'true' && steps.post.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            if [ "${{ steps.pre.outcome }}" != "success" ] || [ -n "$(git diff --cached)" ]; then
+              if git diff --cached | grep -q 'secret'; then
+                echo "Secret detected in diff"
+                exit 1
+              fi
+
+              if git diff --cached --name-only | grep -E '^\.github/workflows/ci\.yml$|^\.env$|^secrets/|^src/.*/migrations/'; then
+                echo "Modified forbidden path"
+                exit 1
+              fi
+
+              if git diff --cached --name-only | grep -Ev '^src/|^tests/snapshots/|^package\.json$|^package-lock\.json$'; then
+                echo "Changes outside allowed files."
+                exit 1
+              fi
+
+              branch="selfheal-$(date +%s)"
+              git checkout -b $branch
+              git commit -m "Auto-repair drift"
+              git push origin $branch
+
+              trigger_reason="Unknown"
+              if [ "${{ github.event_name }}" == "schedule" ]; then trigger_reason="Scheduled"; fi
+              if [ "${{ github.event_name }}" == "workflow_run" ]; then trigger_reason="Reactive CI Failure"; fi
+              if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then trigger_reason="Manual"; fi
+
+              gh pr create --title "[Self-Heal $trigger_reason] Drift fixes" \
+                --body "Trigger: $trigger_reason. View logs in artifacts: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+                --label "automation" --label "self-heal"
+            fi
+          fi
