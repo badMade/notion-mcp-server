@@ -1,0 +1,4 @@
+# AUTO-UPDATED
+schedule: "0 3 * * *"
+rationale: "Initial bootstrap schedule based on moderate telemetry expectation."
+lastUpdated: "2023-10-24T00:00:00Z"
