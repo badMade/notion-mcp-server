@@ -1,0 +1,117 @@
+name: Self Heal
+on:
+  schedule:
+    - cron: '0 3 * * *' # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+jobs:
+  repair:
+    if: >
+      github.repository != '' &&
+      (github.event_name == 'schedule' && github.ref_name == 'main' ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Close stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+            gh pr list --label self-heal --state open --json number,createdAt | jq -c '.[]' | while read i; do
+              number=$(echo $i | jq -r .number)
+              createdAt=$(echo $i | jq -r .createdAt)
+              older_than=$(date -d "7 days ago" +%s)
+              pr_date=$(date -d "$createdAt" +%s)
+              if [ "$pr_date" -lt "$older_than" ]; then
+                gh pr close $number --comment "Closing stale selfheal PR."
+              fi
+            done
+          fi
+      - name: Check recent PRs
+        id: check_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$GH_TOKEN" ]; then
+             open_prs=$(gh pr list --label self-heal --state open --json number | jq length)
+             if [ "$open_prs" -gt 0 ]; then
+               echo "Open PR exists, skipping."
+               echo "skip=true" >> $GITHUB_OUTPUT
+               exit 0
+             fi
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+      - name: Run repair
+        id: repair
+        if: steps.check_pr.outputs.skip != 'true'
+        continue-on-error: true
+        run: |
+          chmod +x scripts/healthcheck.mjs scripts/self_heal.mjs scripts/compute_schedule.mjs
+          ./scripts/self_heal.mjs
+      - name: Check diff boundaries and secrets
+        id: gate
+        if: always() && steps.check_pr.outputs.skip != 'true' && steps.repair.outcome == 'success'
+        run: |
+          if [ -z "$(git status --porcelain | grep -v '\.log$')" ]; then
+            echo "No changes."
+            exit 1
+          fi
+          git add .
+          git reset *.log
+          if git diff --cached --name-only | grep -qE '(\.env|secrets/|\.github/workflows/ci\.yml)'; then
+            echo "Modified forbidden files."
+            exit 1
+          fi
+          if git diff --cached | grep -q 'AKIA'; then
+            echo "Secret detected."
+            exit 1
+          fi
+          exit 0
+      - name: Upload logs
+        if: always() && steps.check_pr.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-logs
+          path: "*.log"
+      - name: Create PR
+        if: steps.gate.outcome == 'success' && !startsWith(github.ref_name, 'selfheal-')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b selfheal-repair-${{ github.run_id }}
+          git commit -m "Auto-repair changes"
+          git push -u origin selfheal-repair-${{ github.run_id }}
+          TITLE="[Self-Heal Manual] Repair"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Auto-generated repair. Triggered by ${{ github.event_name }}. Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "automation,self-heal"
