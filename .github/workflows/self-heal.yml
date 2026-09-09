@@ -1,0 +1,143 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: "0 2 * * *" # AUTO-UPDATED
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    # Only run on main branch, and prevent looping from selfheal PR workflow runs
+    if: |
+      (github.event_name != 'workflow_run' || !startsWith(github.event.workflow_run.head_branch, 'selfheal-')) &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Close stale selfheal PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Cleanup logic for PRs older than 7 days
+          threshold=$(date -d "7 days ago" +%s)
+          gh pr list --label self-heal --state open --json number,createdAt | jq -c '.[]' | while read pr; do
+            num=$(echo "$pr" | jq -r '.number')
+            createdAt=$(echo "$pr" | jq -r '.createdAt')
+            createdSec=$(date -d "$createdAt" +%s)
+            if [ "$createdSec" -lt "$threshold" ]; then
+              echo "Closing stale PR #$num"
+              gh pr close "$num" --comment "Auto-closing stale self-heal PR" || true
+            fi
+          done
+
+          # Also check if an active PR exists in the recent window (e.g. 1 hour) to avoid duplicates
+          recentThreshold=$(date -d "1 hour ago" +%s)
+          gh pr list --label self-heal --state open --json number,createdAt | jq -c '.[]' | while read pr; do
+            createdAt=$(echo "$pr" | jq -r '.createdAt')
+            createdSec=$(date -d "$createdAt" +%s)
+            if [ "$createdSec" -gt "$recentThreshold" ]; then
+              echo "Recent self-heal PR already exists. Aborting to avoid duplicates."
+              exit 1
+            fi
+          done || exit 0
+
+      - name: Pre-healthcheck
+        id: pre
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1 || true
+
+      - name: Run Self-Heal
+        id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-healthcheck
+        id: post
+        if: always()
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Check Diff & Gate
+        id: gate
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          git add -A
+          git reset *.log
+
+          # Secret scanning gate
+          if git diff --cached | grep -iE 'secret|token|api_key|password|credential'; then
+            echo "Secrets found in diff! Aborting."
+            exit 1
+          fi
+
+          # File scopes gate - Allowlist
+          unallowed_files=$(git diff --cached --name-only | grep -vE '^(src/|tests/|package\.json|package-lock\.json|tsconfig\.json|eslint\.config\.mjs)') || true
+          if [ -n "$unallowed_files" ]; then
+             echo "Diff contains changes outside allowed scope: $unallowed_files"
+             exit 1
+          fi
+
+          # File scopes gate - Denylist
+          denied_files=$(git diff --cached --name-only | grep -E '^(\.github/workflows/ci\.yml|\.env|secrets/)') || true
+          if [ -n "$denied_files" ]; then
+             echo "Diff contains changes in denied scope: $denied_files"
+             exit 1
+          fi
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "diff_exists=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfheal-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
+
+      - name: Create PR
+        if: steps.gate.outputs.diff_exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b $BRANCH
+          git commit -m "Auto-repair drift"
+          git push -u origin $BRANCH
+
+          TITLE="[Self-Heal] Drift fixes"
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            TITLE="[Self-Heal Reactive] CI fix"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TITLE="[Self-Heal Manual] Repair"
+          elif [ "${{ github.event_name }}" == "schedule" ]; then
+            TITLE="[Self-Heal Scheduled] Drift fixes"
+          fi
+
+          gh pr create --title "$TITLE" --body "Automated repair triggered by ${{ github.event_name }}.\n\n**Trigger reason:** ${{ github.event_name }}\n**Current Schedule & Rationale:** See \`.github/self-heal-schedule.yml\`\n**Drift Summary:** Check workflow log artifacts.\n\n[Link back to Claude Code / Jules chat]\n\n**Reviewer Checklist:**\n- [ ] Review diff\n- [ ] Check logs" --label "automation,self-heal"
