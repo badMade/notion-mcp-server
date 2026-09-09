@@ -1,0 +1,4 @@
+# AUTO-UPDATED
+schedule: "0 2 * * *"
+rationale: "Initial bootstrap schedule based on default active periods."
+last_updated: "2026-07-04T22:07:52-04:00"

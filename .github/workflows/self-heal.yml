@@ -1,0 +1,94 @@
+name: Self-Heal
+on:
+  schedule:
+    - cron: "0 2 * * *" # AUTO-UPDATED
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Close stale selfheal PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --label self-heal --state open --json number,createdAt | jq -c '.[]' | while read i; do
+            echo "Checking $i"
+          done
+
+      - name: Pre-healthcheck
+        id: pre
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1 || true
+
+      - name: Run Self-Heal
+        id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-healthcheck
+        id: post
+        if: always()
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Check Diff & Gate
+        id: gate
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          git add -A
+          git reset *.log
+          if git diff --cached | grep -q 'secret'; then
+            echo "Secrets found in diff! Aborting."
+            bash -c "exit 1"
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "diff_exists=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfheal-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
+
+      - name: Create PR
+        if: steps.gate.outputs.diff_exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="selfheal-$(date +%s)"
+          git checkout -b $BRANCH
+          git commit -m "Auto-repair drift"
+          git push -u origin $BRANCH
+          gh pr create --title "[Self-Heal] Drift fixes" --body "Automated repair. Logs available in workflow artifacts." --label "automation,self-heal"
