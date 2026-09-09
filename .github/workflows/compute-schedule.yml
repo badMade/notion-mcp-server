@@ -43,5 +43,5 @@ jobs:
             git add .github/self-heal-schedule.yml
             git commit -m "Update self-heal schedule"
             git push -u origin $BRANCH
-            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Schedule recomputed based on telemetry.\n\n**Trigger reason:** schedule\n**Current Schedule & Rationale:** See \`.github/self-heal-schedule.yml\`\n\n[Link back to Claude Code / Jules chat]\n\n**Reviewer Checklist:**\n- [ ] Review cadence updates" --label "automation,self-heal"
+            gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Schedule recomputed based on telemetry." --label "automation,self-heal"
           fi

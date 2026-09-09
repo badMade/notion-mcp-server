@@ -1,4 +1,4 @@
 # AUTO-UPDATED
-schedule: 0 0 * * *
-rationale: Standard velocity (5 PRs/14d). Running daily at quietest hour 0:00.
-last_updated: '2026-09-09T00:56:52.524Z'
+schedule: "0 2 * * *"
+rationale: "Initial bootstrap schedule based on default active periods."
+last_updated: "2026-07-04T22:07:52-04:00"

@@ -1,15 +1,6 @@
 #!/usr/bin/env node
 import { execSync } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const rootDir = path.resolve(__dirname, '..');
-
-// Change to root directory to run commands contextually
-process.chdir(rootDir);
+import { readFileSync, writeFileSync } from 'fs';
 
 function hasDiff() {
   try {
