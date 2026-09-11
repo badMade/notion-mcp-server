@@ -1,0 +1,128 @@
+name: Self-Heal Repair
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >
+      github.ref_name == 'main' &&
+      !startsWith(github.ref_name, 'selfheal-') &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Close Stale PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close PRs older than 7 days
+          stale_date=$(date -d "7 days ago" +%Y-%m-%dT%H:%M:%S)
+          gh pr list --label self-heal --state open --json number,createdAt --jq ".[] | select(.createdAt < \"$stale_date\") | .number" | xargs -I {} gh pr close {} --comment "Auto-closing stale self-heal PR" || true
+
+      - name: Duplicate PR Check
+        id: dup_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          open_prs=$(gh pr list --label self-heal --state open --json number | jq '. | length')
+          if [ "$open_prs" -gt 0 ]; then
+            echo "skip_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install
+        if: steps.dup_check.outputs.skip_run != 'true'
+        run: npm ci
+
+      - name: Pre-healthcheck
+        id: pre
+        if: steps.dup_check.outputs.skip_run != 'true'
+        continue-on-error: true
+        run: |
+          node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Run Self-Heal
+        id: heal
+        if: steps.dup_check.outputs.skip_run != 'true'
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+
+      - name: Post-healthcheck
+        id: post
+        if: always() && steps.heal.outcome == 'success'
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+
+      - name: Upload Logs
+        if: always() && steps.dup_check.outputs.skip_run != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-heal-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
+
+      - name: Configure Git
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check Diff & Boundaries
+        id: diff
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          git add -A
+          git reset *.log || true
+          if [ -n "$(git status --porcelain)" ]; then
+            git diff --cached --name-only | grep -q '^\(.github/workflows/ci\.yml\|.env\|secrets/\)' && exit 1
+            git diff --cached | grep -qiE '(api_key|secret|token|password)=' && exit 1
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR
+        if: always() && steps.post.outcome == 'success' && steps.diff.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE_PREFIX="[Self-Heal"
+          if [ "${{ github.event_name }}" == "schedule" ]; then TITLE_PREFIX+=" Scheduled]"; fi
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then TITLE_PREFIX+=" Reactive]"; fi
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then TITLE_PREFIX+=" Manual]"; fi
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "chore: automated self-heal repair"
+          git push -u origin $BRANCH_NAME
+
+          gh pr create \
+            --title "$TITLE_PREFIX Automated Repair" \
+            --body "Automated drift repair. Artifacts attached to run. Trigger: ${{ github.event_name }}" \
+            --label "automation,self-heal"
