@@ -21,8 +21,7 @@ jobs:
       - run: node scripts/compute_schedule.mjs > compute.log 2>&1
       - id: diff
         run: |
-          git reset *.log
-          if [ -n "$(git status --porcelain)" ]; then echo "has_diff=true" >> $GITHUB_OUTPUT; else echo "has_diff=false" >> $GITHUB_OUTPUT; fi
+          if [ -n "$(git status --porcelain | grep -v '\.log$')" ]; then echo "has_diff=true" >> $GITHUB_OUTPUT; else echo "has_diff=false" >> $GITHUB_OUTPUT; fi
       - if: steps.diff.outputs.has_diff == 'true'
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         run: |
@@ -30,9 +29,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           OPEN_PRS=$(gh pr list --label self-heal-schedule --state open --json createdAt -q 'length')
           if [ "$OPEN_PRS" -gt "0" ]; then exit 0; fi
+          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
+          if git diff --cached --quiet; then exit 0; fi
           BRANCH_NAME="selfheal-schedule-$(date +%s)"
           git checkout -b $BRANCH_NAME
-          git add .github/workflows/self-heal.yml .github/self-heal-schedule.yml
           git commit -m "Update self-heal schedule"
           git push -u origin $BRANCH_NAME
           gh pr create --title "[Self-Heal Schedule] Update cadence" --body "Schedule update." --label "self-heal-schedule"
