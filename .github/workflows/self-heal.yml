@@ -1,0 +1,88 @@
+name: Self-Heal Repair
+on:
+  schedule:
+    - cron: "0 3 * * *" # AUTO-UPDATED
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+concurrency:
+  group: selfheal-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  repair:
+    if: >
+      (!startsWith(github.event.workflow_run.head_branch || github.ref_name, 'selfheal-')) &&
+      (github.event_name != 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Stale PR Cleanup
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh pr list --label self-heal --state open --json number,createdAt | jq -c '.[]' | while read i; do
+            number=$(echo $i | jq '.number')
+            created=$(echo $i | jq -r '.createdAt')
+            if [ $(date -d "$created" +%s) -lt $(date -d "7 days ago" +%s) ]; then
+              gh pr close $number --comment "Auto-closing stale repair PR."
+            fi
+          done
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - id: pre
+        continue-on-error: true
+        run: node scripts/healthcheck.mjs > pre_healthcheck.log 2>&1
+      - id: repair
+        continue-on-error: true
+        run: node scripts/self_heal.mjs > repair.log 2>&1
+      - id: post
+        if: always()
+        run: node scripts/healthcheck.mjs > post_healthcheck.log 2>&1
+      - id: diff
+        if: always() && steps.post.outcome == 'success'
+        run: |
+          if [ -n "$(git status --porcelain | grep -v '\.log$')" ]; then echo "has_diff=true" >> $GITHUB_OUTPUT; else echo "has_diff=false" >> $GITHUB_OUTPUT; fi
+      - id: gates
+        if: always() && steps.post.outcome == 'success' && steps.diff.outputs.has_diff == 'true'
+        run: |
+          git add package.json package-lock.json src/ tests/ || true
+          if git diff --cached | grep -q 'secret'; then exit 1; fi
+          if git diff --cached --name-only | grep -E '^(\.env|secrets/)'; then exit 1; fi
+          if git diff --cached --name-only | grep -E '^(\.github/workflows/ci\.yml|src/.*/migrations/)'; then exit 1; fi
+          exit 0
+      - if: always() && steps.post.outcome == 'success' && steps.diff.outputs.has_diff == 'true' && steps.gates.outcome == 'success'
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          OPEN_PRS=$(gh pr list --label self-heal --state open --json createdAt -q 'length')
+          if [ "$OPEN_PRS" -gt "0" ]; then exit 0; fi
+
+          BRANCH_NAME="selfheal-$(date +%s)"
+          git checkout -b $BRANCH_NAME
+          git commit -m "Auto-repair drift"
+          git push -u origin $BRANCH_NAME
+
+          TITLE="[Self-Heal Manual] Repair"
+          if [ "${{ github.event_name }}" = "schedule" ]; then TITLE="[Self-Heal Scheduled] Drift fixes"; fi
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then TITLE="[Self-Heal Reactive] CI fix"; fi
+
+          gh pr create --title "$TITLE" --body "Triggers: scheduled, reactive, manual. Trigger reason: ${{ github.event_name }}. See https://chat.link for rationale. Uploaded artifacts: \${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }}" --label "self-heal"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-logs
+          path: |
+            pre_healthcheck.log
+            repair.log
+            post_healthcheck.log
